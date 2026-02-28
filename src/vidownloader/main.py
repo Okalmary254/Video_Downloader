@@ -16,42 +16,37 @@ from fastapi.staticfiles import StaticFiles
 app = FastAPI()
 
 
-# --- BASE PATHS ---
+# Base paths
 BASE_DIR = Path(__file__).resolve().parent.parent.parent  # project root
 WEB_DIR = BASE_DIR / "web"
 DOWNLOAD_FOLDER = BASE_DIR / "downloads"
 THUMBNAIL_FOLDER = BASE_DIR / "thumbnails"
 
-
-app.mount("/static", StaticFiles(directory=BASE_DIR / "../../"), name="static")
-
-# Ensure folders exist
+# Create folders if missing
 DOWNLOAD_FOLDER.mkdir(exist_ok=True)
 THUMBNAIL_FOLDER.mkdir(exist_ok=True)
 
-progress_store = {}
-file_metadata = {}
+# Mount static files
+app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
-AUTO_DELETE_AFTER = 3600
-
+# Serve index.html
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    index_file = BASE_DIR / "../../index.html"  # adjust relative to src/vidownloader/main.py
-    return index_file.read_text(encoding="utf-8")
+    return (WEB_DIR / "index.html").read_text(encoding="utf-8")
 
+# Serve JS & CSS explicitly (optional since mounted in /static)
 @app.get("/app.js")
 async def get_app_js():
     return FileResponse(WEB_DIR / "app.js", media_type="application/javascript")
-
 
 @app.get("/styles.css")
 async def get_styles_css():
     return FileResponse(WEB_DIR / "styles.css", media_type="text/css")
 
-# #serve sw.js
-# @app.get("/sw.js", response_class=FileResponse)
-# async def get_sw_js():
-#     return FileResponse("sw.js", media_type="application/javascript")
+progress_store = {}
+file_metadata = {}
+
+AUTO_DELETE_AFTER = 3600
 
 
 def auto_cleanup():
