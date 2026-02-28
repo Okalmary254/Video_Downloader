@@ -9,6 +9,7 @@ import urllib.request
 import urllib.error
 import re
 import subprocess
+import json
 
 app = FastAPI()
 
@@ -34,6 +35,10 @@ async def home():
 async def get_app_js():
     return FileResponse("app.js", media_type="application/javascript")
 
+# #serve sw.js
+# @app.get("/sw.js", response_class=FileResponse)
+# async def get_sw_js():
+#     return FileResponse("sw.js", media_type="application/javascript")
 
 # Serve styles.css
 @app.get("/styles.css", response_class=FileResponse)
@@ -197,21 +202,63 @@ def download_task(job_id, url, format_option):
 
 @app.post("/preview")
 async def preview_video(url: str = Form(...)):
+    """
+    Get video information without downloading
+    """
     try:
+        print(f"Preview request for URL: {url}")
+        
+        # Configure yt-dlp options for extraction only
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
             'extract_flat': False,
+            'force_generic_extractor': False,
+            'ignoreerrors': True,
+            'no_color': True,
+            'geo_bypass': True,
+            'geo_bypass_country': 'US',
         }
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        # Try with different options if first attempt fails
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as e:
+            print(f"First attempt failed: {e}")
+            # Try with different options
+            ydl_opts.update({
+                'format': 'best',
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'referer': 'https://www.google.com',
+            })
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
 
         if not info:
             return JSONResponse(
                 status_code=400,
                 content={"error": "Could not extract video information"}
             )
+
+        # Handle playlist or single video
+        if 'entries' in info:
+            # It's a playlist - take first entry
+            info = info['entries'][0]
+
+        # Format duration
+        duration = info.get('duration')
+        if duration:
+            minutes = duration // 60
+            seconds = duration % 60
+            if minutes > 60:
+                hours = minutes // 60
+                minutes = minutes % 60
+                duration_str = f"{hours}:{minutes:02d}:{seconds:02d}"
+            else:
+                duration_str = f"{minutes}:{seconds:02d}"
+        else:
+            duration_str = "Unknown"
 
         # Format file size
         filesize = info.get('filesize') or info.get('filesize_approx')
@@ -225,35 +272,60 @@ async def preview_video(url: str = Form(...)):
         else:
             filesize_str = "Unknown"
 
-        # Format duration
-        duration = info.get('duration')
-        if duration:
-            minutes = duration // 60
-            seconds = duration % 60
-            duration_str = f"{minutes}:{seconds:02d}"
-        else:
-            duration_str = "Unknown"
+        # Get best thumbnail
+        thumbnail = info.get('thumbnail')
+        thumbnails = info.get('thumbnails', [])
+        if thumbnails and not thumbnail:
+            # Get the highest resolution thumbnail
+            thumbnails.sort(key=lambda x: x.get('height', 0) or x.get('width', 0) or 0, reverse=True)
+            thumbnail = thumbnails[0].get('url')
 
-        return {
+        # Format view count
+        view_count = info.get('view_count', 0)
+        if view_count > 1000000:
+            view_str = f"{view_count/1000000:.1f}M"
+        elif view_count > 1000:
+            view_str = f"{view_count/1000:.1f}K"
+        else:
+            view_str = str(view_count)
+
+        response_data = {
             "title": info.get('title', 'Unknown'),
-            "thumbnail": info.get('thumbnail'),
+            "thumbnail": thumbnail,
             "duration": duration_str,
             "filesize": filesize_str,
-            "uploader": info.get('uploader', 'Unknown'),
-            "view_count": info.get('view_count', 0),
+            "uploader": info.get('uploader', info.get('channel', 'Unknown')),
+            "view_count": view_str,
             "like_count": info.get('like_count', 0),
-            "description": info.get('description', '')[:200] + '...' if info.get('description') else ''
+            "description": info.get('description', '')[:200] + '...' if info.get('description') else '',
+            "upload_date": info.get('upload_date', 'Unknown'),
+            "extractor": info.get('extractor', 'Unknown'),
+            "webpage_url": info.get('webpage_url', url)
         }
         
+        print(f"Preview successful for: {response_data['title']}")
+        return response_data
+        
     except yt_dlp.utils.DownloadError as e:
+        error_msg = str(e)
+        print(f"DownloadError in preview: {error_msg}")
         return JSONResponse(
             status_code=400,
-            content={"error": f"Download error: {str(e)}"}
+            content={"error": f"Could not fetch video info: {error_msg}"}
+        )
+    except yt_dlp.utils.ExtractorError as e:
+        error_msg = str(e)
+        print(f"ExtractorError in preview: {error_msg}")
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Extractor failed: {error_msg}"}
         )
     except Exception as e:
+        error_msg = str(e)
+        print(f"Unexpected error in preview: {error_msg}")
         return JSONResponse(
             status_code=500,
-            content={"error": f"Preview failed: {str(e)}"}
+            content={"error": f"Preview failed: {error_msg}"}
         )
 
 
@@ -397,14 +469,3 @@ def check_ffmpeg():
         return True
     except:
         return False
-
-
-if __name__ == "__main__":
-    import uvicorn
-    PORT = int(os.getenv("PORT", 8000))
-    print(f" Starting Video Downloader on http://127.0.0.1:{PORT}")
-    print(f" Downloads folder: {os.path.abspath(DOWNLOAD_FOLDER)}")
-    print(f"  Thumbnails folder: {os.path.abspath(THUMBNAIL_FOLDER)}")
-    print(f" FFmpeg available: {check_ffmpeg()}")
-    print(" Press Ctrl+C to stop")
-    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)
