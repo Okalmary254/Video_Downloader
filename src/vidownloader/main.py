@@ -5,6 +5,8 @@ import yt_dlp
 import os
 import uuid
 import threading
+from threading import Lock
+from collections import defaultdict
 import time
 import urllib.request
 import urllib.error
@@ -77,25 +79,28 @@ def sanitize_filename(filename):
 
 
 def download_task(job_id, url, format_option):
+    progress_store = defaultdict(dict)
+    progress_lock = Lock()
     def progress_hook(d):
-        if d['status'] == 'downloading':
-            # Extract percentage from string like "45.2%"
-            percent_str = d.get('_percent_str', '0%').strip()
-            # Remove color codes if present
-            percent_str = re.sub(r'\x1b\[[0-9;]*m', '', percent_str)
-            # Extract numeric value
-            percent_match = re.search(r'(\d+(?:\.\d+)?)', percent_str)
-            percent = percent_match.group(1) if percent_match else '0'
+        with progress_lock:
+            if d['status'] == 'downloading':
+                # Extract percentage from string like "45.2%"
+                percent_str = d.get('_percent_str', '0%').strip()
+                # Remove color codes if present
+                percent_str = re.sub(r'\x1b\[[0-9;]*m', '', percent_str)
+                # Extract numeric value
+                percent_match = re.search(r'(\d+(?:\.\d+)?)', percent_str)
+                percent = percent_match.group(1) if percent_match else '0'
             
-            progress_store[job_id] = {
-                "status": "downloading",
-                "percent": percent,
-                "speed": d.get('_speed_str', 'N/A').strip(),
-                "eta": d.get('_eta_str', 'N/A').strip()
-            }
-        elif d['status'] == 'finished':
-            progress_store[job_id]["status"] = "processing"
-            progress_store[job_id]["filename"] = os.path.basename(d.get('filename', ''))
+                progress_store[job_id] = {
+                    "status": "downloading",
+                    "percent": percent,
+                    "speed": d.get('_speed_str', 'N/A').strip(),
+                    "eta": d.get('_eta_str', 'N/A').strip()
+                }
+            elif d['status'] == 'finished':
+                progress_store[job_id]["status"] = "processing"
+                progress_store[job_id]["filename"] = os.path.basename(d.get('filename', ''))
 
     # Format mapping for yt-dlp
     format_map = {
@@ -359,9 +364,11 @@ async def start_download(background_tasks: BackgroundTasks,
 
 @app.get("/progress/{job_id}")
 async def get_progress(job_id: str):
-    if job_id in progress_store:
-        return progress_store[job_id]
-    return {"status": "unknown"}
+    data = progress_store.get(job_id)
+    if not data:
+        return {"status": "unknown"}
+    return data
+
 
 
 @app.get("/files")
@@ -417,7 +424,8 @@ async def download_file(filename: str):
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
-
+@app.get("/file-metadata/{filename}", response_class=JSONResponse)
+@app.head("/file-metadata/{filename}", response_class=Response)  # support HEAD
 @app.get("/file-metadata/{filename}")
 async def get_file_metadata_endpoint(filename: str):
     """Get metadata including thumbnail for a specific file"""
@@ -439,8 +447,8 @@ async def get_file_metadata_endpoint(filename: str):
         'duration': 'Unknown'
     }
 
-
-@app.get("/thumbnails/{filename}")
+@app.get("/thumbnails/{filename}", response_class=FileResponse)
+@app.head("/thumbnails/{filename}", response_class=Response)  # support HEAD
 async def get_thumbnail(filename: str):
     # Security: prevent directory traversal
     filename = os.path.basename(filename)
