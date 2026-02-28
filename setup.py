@@ -5,7 +5,7 @@ setup(
     name="vidownloader",
     version="1.0.0",
     description="Video Downloader with Web UI",
-    author="Your Name",
+    author="John Mary",
     py_modules=["vidownloader"],
     install_requires=[
         "click>=8.0.0",
