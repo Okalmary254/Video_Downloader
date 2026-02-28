@@ -1,3 +1,4 @@
+from pathlib import Path
 from fastapi import FastAPI, Form, BackgroundTasks
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 import yt_dlp
@@ -13,37 +14,39 @@ import json
 
 app = FastAPI()
 
-DOWNLOAD_FOLDER = "downloads"
-THUMBNAIL_FOLDER = "thumbnails"
-os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
-os.makedirs(THUMBNAIL_FOLDER, exist_ok=True)
+# --- BASE PATHS ---
+BASE_DIR = Path(__file__).resolve().parent.parent.parent  # project root
+WEB_DIR = BASE_DIR / "web"
+DOWNLOAD_FOLDER = BASE_DIR / "downloads"
+THUMBNAIL_FOLDER = BASE_DIR / "thumbnails"
+
+# Ensure folders exist
+DOWNLOAD_FOLDER.mkdir(exist_ok=True)
+THUMBNAIL_FOLDER.mkdir(exist_ok=True)
 
 progress_store = {}
-file_metadata = {}  # Store thumbnail mapping
+file_metadata = {}
 
-AUTO_DELETE_AFTER = 3600  # 1 hour
-
+AUTO_DELETE_AFTER = 3600
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    with open("index.html", "r") as f:
-        return f.read()
+    return (WEB_DIR / "index.html").read_text()
 
 
-# Serve app.js
-@app.get("/app.js", response_class=FileResponse)
+@app.get("/app.js")
 async def get_app_js():
-    return FileResponse("app.js", media_type="application/javascript")
+    return FileResponse(WEB_DIR / "app.js", media_type="application/javascript")
+
+
+@app.get("/styles.css")
+async def get_styles_css():
+    return FileResponse(WEB_DIR / "styles.css", media_type="text/css")
 
 # #serve sw.js
 # @app.get("/sw.js", response_class=FileResponse)
 # async def get_sw_js():
 #     return FileResponse("sw.js", media_type="application/javascript")
-
-# Serve styles.css
-@app.get("/styles.css", response_class=FileResponse)
-async def get_styles_css():
-    return FileResponse("styles.css", media_type="text/css")
 
 
 def auto_cleanup():
@@ -57,11 +60,10 @@ def auto_cleanup():
                     os.remove(path)
         
         # Clean thumbnails
-        for thumb in os.listdir(THUMBNAIL_FOLDER):
-            path = os.path.join(THUMBNAIL_FOLDER, thumb)
-            if os.path.isfile(path):
-                if now - os.path.getmtime(path) > AUTO_DELETE_AFTER:
-                    os.remove(path)
+        for thumb in THUMBNAIL_FOLDER.iterdir():
+            if thumb.is_file():
+                if time.time() - thumb.stat().st_mtime > AUTO_DELETE_AFTER:
+                    thumb.unlink()
         
         time.sleep(300)
 
@@ -249,9 +251,10 @@ async def preview_video(url: str = Form(...)):
         # Format duration
         duration = info.get('duration')
         if duration:
+            duration = int(duration)
             minutes = duration // 60
             seconds = duration % 60
-            if minutes > 60:
+            if minutes >= 60:
                 hours = minutes // 60
                 minutes = minutes % 60
                 duration_str = f"{hours}:{minutes:02d}:{seconds:02d}"

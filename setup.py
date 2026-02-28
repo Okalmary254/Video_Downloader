@@ -1,4 +1,3 @@
-
 from setuptools import setup, find_packages
 
 setup(
@@ -6,7 +5,8 @@ setup(
     version="1.0.0",
     description="Video Downloader with Web UI",
     author="John Mary",
-    py_modules=["vidownloader"],
+    packages=find_packages(where="src"),   
+    package_dir={"": "src"},               
     install_requires=[
         "click>=8.0.0",
         "fastapi>=0.104.0",
@@ -16,7 +16,7 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "vidownloader=vidownloader:main",
+            "vidownloader=vidownloader.vidownloader:main",
         ],
     },
     python_requires=">=3.8",

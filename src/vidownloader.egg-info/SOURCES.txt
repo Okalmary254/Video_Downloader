@@ -1,0 +1,12 @@
+setup.py
+src/vidownloader/__init__.py
+src/vidownloader/desktop_app.py
+src/vidownloader/main.py
+src/vidownloader/run.py
+src/vidownloader/vidownloader.py
+src/vidownloader.egg-info/PKG-INFO
+src/vidownloader.egg-info/SOURCES.txt
+src/vidownloader.egg-info/dependency_links.txt
+src/vidownloader.egg-info/entry_points.txt
+src/vidownloader.egg-info/requires.txt
+src/vidownloader.egg-info/top_level.txt

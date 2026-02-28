@@ -1,0 +1,2 @@
+[console_scripts]
+vidownloader = vidownloader.vidownloader:main
