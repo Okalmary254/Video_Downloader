@@ -1,5 +1,5 @@
 from pathlib import Path
-from fastapi import FastAPI, Form, BackgroundTasks
+from fastapi import FastAPI, Form, BackgroundTasks, Response
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 import yt_dlp
 import os
@@ -398,7 +398,8 @@ async def list_files():
         )
 
 
-@app.get("/download-file/{filename}")
+@app.get("/download-file/{filename}", response_class=FileResponse)
+@app.head("/download-file/{filename}", response_class=Response)  # support HEAD
 async def download_file(filename: str):
     filename = os.path.basename(filename)
     path = os.path.join(DOWNLOAD_FOLDER, filename)
