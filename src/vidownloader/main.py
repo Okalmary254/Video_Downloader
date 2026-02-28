@@ -11,8 +11,11 @@ import urllib.error
 import re
 import subprocess
 import json
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI()
+
+app.mount("/", StaticFiles(directory=".", html=True), name="static")
 
 # --- BASE PATHS ---
 BASE_DIR = Path(__file__).resolve().parent.parent.parent  # project root
