@@ -11,6 +11,7 @@ import webbrowser
 import time
 import signal
 import atexit
+import threading
 from pathlib import Path
 
 @click.command()
