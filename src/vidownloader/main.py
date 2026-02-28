@@ -400,7 +400,6 @@ async def list_files():
 
 @app.get("/download-file/{filename}")
 async def download_file(filename: str):
-    # Security: prevent directory traversal
     filename = os.path.basename(filename)
     path = os.path.join(DOWNLOAD_FOLDER, filename)
     
@@ -413,7 +412,8 @@ async def download_file(filename: str):
     return FileResponse(
         path,
         filename=filename,
-        media_type='application/octet-stream'
+        media_type='application/octet-stream',
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
 
