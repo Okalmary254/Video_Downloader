@@ -364,48 +364,9 @@ async def start_download(background_tasks: BackgroundTasks,
 
 @app.get("/progress/{job_id}")
 async def get_progress(job_id: str):
-    data = progress_store.get(job_id)
-    if not data:
-        return {"status": "unknown"}
-    return data
-
-    def progress_hook(d):
-        with progress_lock:
-            if job_id not in progress_store:
-                progress_store[job_id] = {"status": "starting", "percent": "0"}
-
-        status = d.get("status")
-
-        if status == "downloading":
-            # Always default numeric values
-            percent = 0
-            try:
-                percent_match = re.search(r"(\d+(?:\.\d+)?)", d.get("_percent_str", "0"))
-                percent = float(percent_match.group(1)) if percent_match else 0
-            except Exception:
-                percent = 0
-
-            progress_store[job_id].update({
-                "status": "downloading",
-                "percent": str(int(percent)),  # frontend expects string or int
-                "speed": d.get("_speed_str", "N/A"),
-                "eta": d.get("_eta_str", "N/A")
-            })
-
-        elif status == "finished":
-            filename = os.path.basename(d.get("filename", "unknown.mp4"))
-            progress_store[job_id].update({
-                "status": "processing",
-                "percent": "100",
-                "filename": filename
-            })
-
-        elif status == "error":
-            progress_store[job_id].update({
-                "status": "error",
-                "percent": "0",
-                "error": str(d.get("error", "Unknown error"))
-            })
+    if job_id in progress_store:
+        return progress_store[job_id]
+    return {"status": "unknown"}
 
 
 
