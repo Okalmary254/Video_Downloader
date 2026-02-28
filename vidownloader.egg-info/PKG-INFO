@@ -2,7 +2,7 @@ Metadata-Version: 2.4
 Name: vidownloader
 Version: 1.0.0
 Summary: Video Downloader with Web UI
-Author: Your Name
+Author: John Mary
 Requires-Python: >=3.8
 Requires-Dist: click>=8.0.0
 Requires-Dist: fastapi>=0.104.0
