@@ -11,17 +11,19 @@ import urllib.error
 import re
 import subprocess
 import json
-# from fastapi.staticfiles import StaticFiles
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI()
 
-# app.mount("/", StaticFiles(directory=".", html=True), name="static")
 
 # --- BASE PATHS ---
 BASE_DIR = Path(__file__).resolve().parent.parent.parent  # project root
 WEB_DIR = BASE_DIR / "web"
 DOWNLOAD_FOLDER = BASE_DIR / "downloads"
 THUMBNAIL_FOLDER = BASE_DIR / "thumbnails"
+
+
+app.mount("/static", StaticFiles(directory=BASE_DIR / "../../"), name="static")
 
 # Ensure folders exist
 DOWNLOAD_FOLDER.mkdir(exist_ok=True)
@@ -34,8 +36,8 @@ AUTO_DELETE_AFTER = 3600
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    return (WEB_DIR / "index.html").read_text()
-
+    index_file = BASE_DIR / "../../index.html"  # adjust relative to src/vidownloader/main.py
+    return index_file.read_text(encoding="utf-8")
 
 @app.get("/app.js")
 async def get_app_js():
