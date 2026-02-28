@@ -1,0 +1,8 @@
+setup.py
+vidownloader.py
+vidownloader.egg-info/PKG-INFO
+vidownloader.egg-info/SOURCES.txt
+vidownloader.egg-info/dependency_links.txt
+vidownloader.egg-info/entry_points.txt
+vidownloader.egg-info/requires.txt
+vidownloader.egg-info/top_level.txt
