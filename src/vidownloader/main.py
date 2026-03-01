@@ -20,6 +20,14 @@ import mimetypes
 from urllib.parse import unquote
 import tempfile
 import shutil
+from starlette.responses import StreamingResponse
+import aiofiles
+from cachetools import cached, TTLCache
+import aiocache
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 
 app = FastAPI()
 
@@ -48,6 +56,7 @@ THUMBNAIL_FOLDER.mkdir(exist_ok=True)
 
 # Create web folder if it doesn't exist
 WEB_DIR.mkdir(exist_ok=True)
+# Limit quality for faster downloads
 
 # Mount static files
 if WEB_DIR.exists():
@@ -222,8 +231,18 @@ def download_task(job_id, url, format_option):
         'extract_flat': False,
         'ignoreerrors': True,
         'no_color': True,
-        # Add windows compatibility
-        'windowsfilenames': True,  # This helps with Windows compatibility
+        'geo_bypass': True,
+        'windowsfilenames': True,
+        'concurrent_fragment_downloads': 5,
+        'fragment_retries': 3,
+        'file_access_retries': 3,
+        'format': 'best[height<=1080]',
+        'buffersize': 1024,  
+        'http_chunk_size': 10_485_760,
+        'throttledratelimit': 10_000_000,
+        'sleep_interval': 0,  
+        'max_sleep_interval': 0,
+        'sleep_interval_requests': 0,
     }
 
     # Add post-processors for specific formats
@@ -561,6 +580,22 @@ async def download_file(filename: str):
 
         file_size = path.stat().st_size
         
+        async def interfile():
+            async with aiofiles.open(path, 'rb') as f:
+                while chunk := await f.read(1024 * 1024):  # 1 MB chunks
+                    yield chunk
+
+        # return StreamingResponse(
+        #     interfile(),
+        #     media_type='application/octet-stream',
+        #     headers={
+        #         "Content-Disposition": f"attachment; filename=\"{filename}\"",
+        #         "Content-Length": str(file_size),
+
+        #     }
+
+        # )     
+
         # Determine media type
         if filename.endswith('.mp4'):
             media_type = 'video/mp4'
@@ -617,6 +652,20 @@ async def device_info():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+
+# Cache video metadata to avoid repeated extraction
+@cached(cache=TTLCache(maxsize=100, ttl=300))
+def get_video_info(url):
+    with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+        return ydl.extract_info(url, download=False)
+
+# Use connection pooling for HTTP requests
+session = requests.Session()
+retry = Retry(connect=3, backoff_factor=0.5)
+adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=retry)
+session.mount('http://', adapter)
+session.mount('https://', adapter)
 
 if __name__ == "__main__":
     import uvicorn
