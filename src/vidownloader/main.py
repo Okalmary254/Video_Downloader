@@ -27,6 +27,9 @@ WEB_DIR = BASE_DIR / "web"
 DOWNLOAD_FOLDER = BASE_DIR / "downloads"
 THUMBNAIL_FOLDER = BASE_DIR / "thumbnails"
 
+LAPTOP_DOWNLOAD_FOLDER = DOWNLOAD_FOLDER / "laptop"
+MOBILE_DOWNLOAD_FOLDER = DOWNLOAD_FOLDER / "mobile"
+
 print(f"BASE_DIR: {BASE_DIR}")
 print(f"WEB_DIR: {WEB_DIR}")
 print(f"DOWNLOAD_FOLDER: {DOWNLOAD_FOLDER}")
@@ -34,6 +37,8 @@ print(f"DOWNLOAD_FOLDER: {DOWNLOAD_FOLDER}")
 # Create folders if missing
 DOWNLOAD_FOLDER.mkdir(exist_ok=True)
 THUMBNAIL_FOLDER.mkdir(exist_ok=True)
+LAPTOP_DOWNLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
+MOBILE_DOWNLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
 
 # Create web folder if it doesn't exist
 WEB_DIR.mkdir(exist_ok=True)
@@ -57,6 +62,22 @@ LOCAL_IP = get_local_ip()
 print(f"\n🌐 Server is accessible at:")
 print(f"   Local: http://127.0.0.1:8000")
 print(f"   Network: http://{LOCAL_IP}:8000 (for mobile devices)\n")
+
+def get_device_type(user_agent: str):
+    """Simple user agent check to determine device type"""
+    user_agent = user_agent.lower()
+    if any(mobile in user_agent for mobile in ["iphone", "android", "ipad", "mobile"]):
+        return "mobile"
+    return "laptop"
+
+
+def get_device_folder(request: Request) -> Path:
+    """Determine download folder based on device type"""
+    user_agent = request.headers.get("user-agent", "")
+    device_type = get_device_type(user_agent)
+    if device_type == "mobile":
+        return MOBILE_DOWNLOAD_FOLDER
+    return LAPTOP_DOWNLOAD_FOLDER
 
 # Debug endpoint to see all registered routes
 @app.get("/debug/routes")
@@ -194,7 +215,7 @@ def sanitize_filename(filename):
     """Remove invalid characters from filename"""
     return re.sub(r'[<>:"/\\|?*]', '', filename)
 
-def download_task(job_id, url, format_option):
+def download_task(job_id, url, format_option, device_folder):
     def progress_hook(d):
         with progress_lock:
             if d['status'] == 'downloading':
@@ -330,7 +351,9 @@ def download_task(job_id, url, format_option):
                             'title': info.get('title', 'Unknown'),
                             'uploader': info.get('uploader', 'Unknown'),
                             'duration': info.get('duration', 0),
-                            'filename': video_basename
+                            'filename': video_basename,
+                            'device': device_folder.name,
+                            'download_path': str(device_folder / video_basename)
                         }
                         
                         print(f"Thumbnail saved for: {video_basename}")
@@ -502,6 +525,7 @@ async def preview_video(url: str = Form(...)):
 
 @app.post("/start-download")
 async def start_download(background_tasks: BackgroundTasks,
+                         request: Request,
                          url: str = Form(...),
                          quality: str = Form(...)):
 
@@ -513,6 +537,7 @@ async def start_download(background_tasks: BackgroundTasks,
         )
 
     job_id = str(uuid.uuid4())
+    device_folder = get_device_folder(request)
 
     with progress_lock:
         progress_store[job_id] = {
@@ -521,7 +546,7 @@ async def start_download(background_tasks: BackgroundTasks,
             "message": "Initializing download..."
         }
 
-    background_tasks.add_task(download_task, job_id, url.strip(), quality)
+    background_tasks.add_task(download_task, job_id, url.strip(), quality, device_folder)
 
     return {"job_id": job_id}
 
@@ -762,7 +787,7 @@ async def stream_file(filename: str, request: Request):
         print(f"Stream error: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
     
-    
+
 # Also add a streaming endpoint for better mobile support
 @app.api_route("/stream/{filename:path}", methods=["GET", "HEAD"])
 async def stream_file(filename: str, request: Request):
