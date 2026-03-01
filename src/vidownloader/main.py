@@ -2,6 +2,7 @@ from email.quoprimime import quote
 from pathlib import Path
 from fastapi import FastAPI, Form, BackgroundTasks, Response, Request
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
 import os
 import uuid
@@ -20,6 +21,31 @@ import mimetypes
 from urllib.parse import unquote
 
 app = FastAPI()
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Store device info in request state
+@app.middleware("http")
+async def add_device_info(request: Request, call_next):
+    """Middleware to add device info to request state"""
+    user_agent = request.headers.get("user-agent", "")
+    device_type = get_device_type(user_agent)
+    request.state.device_type = device_type
+    request.state.device_folder = get_device_folder(device_type)
+    
+    # Log every request with device info
+    print(f"\n[{device_type.upper()}] {request.method} {request.url.path}")
+    print(f"  User-Agent: {user_agent[:100]}...")
+    
+    response = await call_next(request)
+    return response
 
 # Base paths
 BASE_DIR = Path(__file__).resolve().parent.parent.parent  # project root
@@ -78,41 +104,34 @@ def get_device_type(user_agent: str):
     # Check for mobile
     for keyword in mobile_keywords:
         if keyword in user_agent:
-            print(f"Mobile detected via keyword: {keyword}")
+            print(f"✅ Mobile detected via keyword: {keyword}")
             return "mobile"
     
     # Check for tablet (also mobile)
     tablet_keywords = ['tablet', 'ipad', 'kindle', 'playbook']
     for keyword in tablet_keywords:
         if keyword in user_agent:
-            print(f"Tablet detected via keyword: {keyword}")
+            print(f" Tablet detected via keyword: {keyword}")
             return "mobile"
     
     # Check for Android without mobile (could be tablet)
     if 'android' in user_agent and 'mobile' not in user_agent:
-        # This might be an Android tablet
-        print(f"Android tablet detected")
+        print(f" Android tablet detected")
         return "mobile"
     
     # Check for common desktop indicators
     desktop_keywords = ['windows nt', 'macintosh', 'linux x86', 'x11']
     for keyword in desktop_keywords:
         if keyword in user_agent:
-            print(f"Desktop detected via keyword: {keyword}")
+            print(f" Desktop detected via keyword: {keyword}")
             return "laptop"
     
     # Default to laptop if no mobile indicators
-    print(f"Defaulting to laptop for user agent: {user_agent[:100]}")
+    print(f" Unknown device, defaulting to laptop for: {user_agent[:100]}")
     return "laptop"
 
-
-def get_device_folder(request: Request) -> Path:
-    """Determine download folder based on device type"""
-    user_agent = request.headers.get("user-agent", "")
-    device_type = get_device_type(user_agent)
-    print(f"Device detection - User-Agent: {user_agent[:100]}...")
-    print(f"Device type determined: {device_type}")
-    
+def get_device_folder(device_type: str) -> Path:
+    """Get folder path based on device type"""
     if device_type == "mobile":
         return MOBILE_DOWNLOAD_FOLDER
     return LAPTOP_DOWNLOAD_FOLDER
@@ -123,12 +142,20 @@ async def debug_device(request: Request):
     """Debug endpoint to check device detection"""
     user_agent = request.headers.get("user-agent", "")
     device_type = get_device_type(user_agent)
+    device_folder = get_device_folder(device_type)
+    
+    # List files in both folders
+    laptop_files = [f.name for f in LAPTOP_DOWNLOAD_FOLDER.glob("*") if f.is_file() and not f.name.endswith(('.jpg', '.jpeg', '.png', '.webp'))]
+    mobile_files = [f.name for f in MOBILE_DOWNLOAD_FOLDER.glob("*") if f.is_file() and not f.name.endswith(('.jpg', '.jpeg', '.png', '.webp'))]
     
     return {
         "user_agent": user_agent[:200],
         "device_type": device_type,
+        "device_folder": str(device_folder),
         "laptop_folder": str(LAPTOP_DOWNLOAD_FOLDER),
         "mobile_folder": str(MOBILE_DOWNLOAD_FOLDER),
+        "laptop_files": laptop_files,
+        "mobile_files": mobile_files,
         "detection_method": "keyword based"
     }
 
@@ -278,7 +305,7 @@ def sanitize_filename(filename):
     """Remove invalid characters from filename"""
     return re.sub(r'[<>:"/\\|?*]', '', filename)
 
-def download_task(job_id, url, format_option, device_folder):
+def download_task(job_id, url, format_option, device_type, device_folder):
     def progress_hook(d):
         with progress_lock:
             if d['status'] == 'downloading':
@@ -296,13 +323,13 @@ def download_task(job_id, url, format_option, device_folder):
                     "percent": percent,
                     "speed": d.get('_speed_str', 'N/A').strip(),
                     "eta": d.get('_eta_str', 'N/A').strip(),
-                    "device": device_folder.name
+                    "device": device_type
                 }
             elif d['status'] == 'finished':
                 if job_id in progress_store:
                     progress_store[job_id]["status"] = "processing"
                     progress_store[job_id]["filename"] = os.path.basename(d.get('filename', ''))
-                    progress_store[job_id]["device"] = device_folder.name
+                    progress_store[job_id]["device"] = device_type
 
     # Format mapping for yt-dlp
     format_map = {
@@ -363,16 +390,17 @@ def download_task(job_id, url, format_option, device_folder):
             with progress_lock:
                 if job_id in progress_store:
                     progress_store[job_id]["title"] = info.get('title', 'Unknown')
-                    progress_store[job_id]["device"] = device_folder.name
+                    progress_store[job_id]["device"] = device_type
                 else:
                     progress_store[job_id] = {
                         "status": "starting",
                         "percent": "0",
                         "title": info.get('title', 'Unknown'),
-                        "device": device_folder.name
+                        "device": device_type
                     }
             
-            print(f"Starting download to {device_folder.name}: {info.get('title', 'Unknown')}")
+            print(f"Starting download to {device_type.upper()} folder: {device_folder}")
+            print(f"  Title: {info.get('title', 'Unknown')}")
             
             # Download the video
             ydl.download([url])
@@ -397,9 +425,9 @@ def download_task(job_id, url, format_option, device_folder):
                     files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
                     video_basename = files[0].name
                     actual_path = files[0]
-                    print(f"Found actual file: {video_basename} in {device_folder.name}")
+                    print(f"Found actual file: {video_basename} in {device_type.upper()} folder")
                 else:
-                    raise Exception(f"Downloaded file not found in {device_folder.name}. Checked formats: mp4, mp3, webm, mkv, m4a, opus")
+                    raise Exception(f"Downloaded file not found in {device_type.upper()} folder")
             
             file_size = actual_path.stat().st_size
             print(f"✓ Verified file exists: {actual_path} (size: {file_size:,} bytes)")
@@ -442,12 +470,12 @@ def download_task(job_id, url, format_option, device_folder):
                             'uploader': info.get('uploader', 'Unknown'),
                             'duration': info.get('duration', 0),
                             'filename': video_basename,
-                            'device': device_folder.name,
+                            'device': device_type,
                             'download_path': str(device_folder / video_basename),
                             'file_size': file_size
                         }
                         
-                        print(f"✓ Thumbnail saved for: {video_basename} ({device_folder.name})")
+                        print(f"✓ Thumbnail saved for: {video_basename} ({device_type.upper()})")
                 except Exception as e:
                     print(f"⚠ Thumbnail download failed: {e}")
             
@@ -457,11 +485,11 @@ def download_task(job_id, url, format_option, device_folder):
                     "status": "finished",
                     "filename": video_basename,
                     "title": info.get('title', 'Unknown'),
-                    "device": device_folder.name,
+                    "device": device_type,
                     "percent": "100"
                 }
             
-            print(f"✓ Download completed: {video_basename} on {device_folder.name}")
+            print(f"✓ Download completed: {video_basename} on {device_type.upper()}")
             print(f"  File location: {actual_path}")
             print(f"  File size: {file_size:,} bytes")
             
@@ -470,7 +498,7 @@ def download_task(job_id, url, format_option, device_folder):
             progress_store[job_id] = {
                 "status": "error",
                 "error": str(e),
-                "device": device_folder.name
+                "device": device_type
             }
         print(f"✗ Download error: {e}")
         import traceback
@@ -633,11 +661,10 @@ async def start_download(background_tasks: BackgroundTasks,
         )
 
     job_id = str(uuid.uuid4())
-    device_folder = get_device_folder(request)
-    device_type = get_device_type(request.headers.get("user-agent", ""))
+    device_type = request.state.device_type
+    device_folder = request.state.device_folder
 
-    print(f"\n Starting download:")
-    print(f"  Device: {device_type}")
+    print(f"\n Starting download for {device_type.upper()}:")
     print(f"  Folder: {device_folder}")
     print(f"  Job ID: {job_id}")
     print(f"  URL: {url}")
@@ -651,7 +678,7 @@ async def start_download(background_tasks: BackgroundTasks,
             "device": device_type
         }
 
-    background_tasks.add_task(download_task, job_id, url.strip(), quality, device_folder)
+    background_tasks.add_task(download_task, job_id, url.strip(), quality, device_type, device_folder)
 
     return {"job_id": job_id, "device": device_type}
 
@@ -695,10 +722,10 @@ async def progress_options(job_id: str):
 async def list_files(request: Request):
     """List files only for the requesting device"""
     try:
-        device_folder = get_device_folder(request)
-        device_type = get_device_type(request.headers.get("user-agent", ""))
+        device_type = request.state.device_type
+        device_folder = request.state.device_folder
         
-        print(f"\n Listing files for {device_type}:")
+        print(f"\n Listing files for {device_type.upper()}:")
         print(f"  Folder: {device_folder}")
         print(f"  Folder exists: {device_folder.exists()}")
         
@@ -773,23 +800,26 @@ async def download_file(filename: str, request: Request):
         filename = unquote(filename)
         
         # Get device-specific folder
-        device_folder = get_device_folder(request)
+        device_type = request.state.device_type
+        device_folder = request.state.device_folder
         path = device_folder / filename
 
-        print(f"Download requested: {filename} from {device_folder.name}")
+        print(f"Download requested: {filename} from {device_type.upper()} folder")
         print(f"Full path: {path}")
         print(f"File exists: {path.exists()}")
 
         if not path.exists():
             # Try the other device folder as fallback
-            if device_folder == LAPTOP_DOWNLOAD_FOLDER:
+            if device_type == "laptop":
                 alt_path = MOBILE_DOWNLOAD_FOLDER / filename
+                alt_device = "mobile"
             else:
                 alt_path = LAPTOP_DOWNLOAD_FOLDER / filename
+                alt_device = "laptop"
                 
             if alt_path.exists():
                 path = alt_path
-                print(f"Found in alternative folder: {alt_path}")
+                print(f"Found in {alt_device.upper()} folder: {alt_path}")
             else:
                 return JSONResponse(
                     status_code=404,
@@ -847,12 +877,13 @@ async def stream_file(filename: str, request: Request):
         filename = os.path.basename(unquote(filename))
         
         # Get device-specific folder
-        device_folder = get_device_folder(request)
+        device_type = request.state.device_type
+        device_folder = request.state.device_folder
         path = device_folder / filename
 
         if not path.exists():
             # Try the other device folder as fallback
-            if device_folder == LAPTOP_DOWNLOAD_FOLDER:
+            if device_type == "laptop":
                 alt_path = MOBILE_DOWNLOAD_FOLDER / filename
             else:
                 alt_path = LAPTOP_DOWNLOAD_FOLDER / filename
@@ -934,8 +965,8 @@ async def download_file_options(filename: str):
 @app.get("/device-info")
 async def device_info(request: Request):
     """Get device information"""
-    device_type = get_device_type(request.headers.get("user-agent", ""))
-    device_folder = get_device_folder(request)
+    device_type = request.state.device_type
+    device_folder = request.state.device_folder
     
     # Count files in device folder
     file_count = len([f for f in device_folder.glob("*") if f.is_file() and not f.name.endswith(('.jpg', '.jpeg', '.png', '.webp'))])
