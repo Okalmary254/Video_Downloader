@@ -45,10 +45,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent  # project root
 WEB_DIR = BASE_DIR / "web"
 TEMP_DOWNLOAD_FOLDER = BASE_DIR / "temp_downloads"  # Temporary storage
 THUMBNAIL_FOLDER = BASE_DIR / "thumbnails"
+COOKIES_FILE_PATH = os.path.join(os.path.dirname(__file__), "cookies.txt")
 
 print(f"BASE_DIR: {BASE_DIR}")
 print(f"WEB_DIR: {WEB_DIR}")
 print(f"TEMP_DOWNLOAD_FOLDER: {TEMP_DOWNLOAD_FOLDER}")
+print(f"COOKIES_FILE_PATH: {COOKIES_FILE_PATH}")
 
 # Create folders if missing
 TEMP_DOWNLOAD_FOLDER.mkdir(exist_ok=True)
@@ -254,6 +256,7 @@ def download_task(job_id, url, format_option):
         'sleep_interval': 0,  
         'max_sleep_interval': 0,
         'sleep_interval_requests': 0,
+        'cookiefile': COOKIES_FILE_PATH
     }
 
     # Add post-processors for specific formats
