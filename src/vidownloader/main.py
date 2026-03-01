@@ -69,18 +69,6 @@ print(f"\n Server is accessible at:")
 print(f"   Local: http://127.0.0.1:8000")
 print(f"   Network: http://{LOCAL_IP}:8000 (for mobile devices)\n")
 
-# Debug endpoint to see all registered routes
-@app.get("/debug/routes")
-async def debug_routes():
-    routes = []
-    for route in app.routes:
-        routes.append({
-            "path": route.path,
-            "name": route.name,
-            "methods": list(route.methods) if hasattr(route, 'methods') else None
-        })
-    return {"routes": routes}
-
 # Serve index.html
 @app.get("/", response_class=HTMLResponse)
 async def home():
@@ -132,6 +120,23 @@ async def get_styles_css():
             return FileResponse(path, media_type="text/css")
     
     return JSONResponse(status_code=404, content={"error": "styles.css not found"})
+
+# Serve sw.js
+@app.get("/sw.js")
+async def get_sw_js():
+    possible_paths = [
+        WEB_DIR / "sw.js",
+        BASE_DIR / "web" / "sw.js",
+        BASE_DIR / "sw.js",
+        Path(__file__).parent / "sw.js",
+        Path(__file__).parent / "web" / "sw.js",
+    ]
+    
+    for path in possible_paths:
+        if path.exists():
+            return FileResponse(path, media_type="application/javascript")
+    
+    return JSONResponse(status_code=404, content={"error": "sw.js not found"})
 
 # Global progress store with lock for thread safety
 progress_store = {}
@@ -359,31 +364,61 @@ async def preview_video(url: str = Form(...)):
         if 'entries' in info and info['entries']:
             info = info['entries'][0]
 
-        # Format duration
+        # Format duration - FIXED: Handle float values properly
         duration = info.get('duration')
-        if duration:
-            minutes = duration // 60
-            seconds = duration % 60
-            duration_str = f"{minutes}:{seconds:02d}" if minutes < 60 else f"{minutes//60}:{minutes%60:02d}:{seconds:02d}"
+        if duration is not None:
+            # Convert to int safely
+            try:
+                duration = int(float(duration))
+                minutes = duration // 60
+                seconds = duration % 60
+                if minutes >= 60:
+                    hours = minutes // 60
+                    minutes = minutes % 60
+                    duration_str = f"{hours}:{minutes:02d}:{seconds:02d}"
+                else:
+                    duration_str = f"{minutes}:{seconds:02d}"
+            except (ValueError, TypeError):
+                duration_str = "Unknown"
         else:
             duration_str = "Unknown"
 
         # Format file size
         filesize = info.get('filesize') or info.get('filesize_approx')
         if filesize:
-            if filesize > 1024 * 1024 * 1024:
-                filesize_str = f"{filesize / (1024*1024*1024):.1f} GB"
-            elif filesize > 1024 * 1024:
-                filesize_str = f"{filesize / (1024*1024):.1f} MB"
-            else:
-                filesize_str = f"{filesize / 1024:.1f} KB"
+            try:
+                filesize = float(filesize)
+                if filesize > 1024 * 1024 * 1024:
+                    filesize_str = f"{filesize / (1024*1024*1024):.1f} GB"
+                elif filesize > 1024 * 1024:
+                    filesize_str = f"{filesize / (1024*1024):.1f} MB"
+                else:
+                    filesize_str = f"{filesize / 1024:.1f} KB"
+            except (ValueError, TypeError):
+                filesize_str = "Unknown"
         else:
             filesize_str = "Unknown"
 
         # Get thumbnail
         thumbnail = info.get('thumbnail')
         if not thumbnail and info.get('thumbnails'):
-            thumbnail = info['thumbnails'][-1].get('url')
+            thumbnails = info['thumbnails']
+            if thumbnails:
+                # Get the last thumbnail (usually highest quality)
+                thumbnail = thumbnails[-1].get('url')
+
+        # Format view count
+        view_count = info.get('view_count', 0)
+        try:
+            view_count = int(float(view_count))
+            if view_count > 1000000:
+                view_str = f"{view_count/1000000:.1f}M"
+            elif view_count > 1000:
+                view_str = f"{view_count/1000:.1f}K"
+            else:
+                view_str = str(view_count)
+        except (ValueError, TypeError):
+            view_str = "0"
 
         return {
             "title": info.get('title', 'Unknown'),
@@ -391,11 +426,13 @@ async def preview_video(url: str = Form(...)):
             "duration": duration_str,
             "filesize": filesize_str,
             "uploader": info.get('uploader', info.get('channel', 'Unknown')),
-            "view_count": info.get('view_count', 0),
+            "view_count": view_str,
         }
         
     except Exception as e:
         print(f"Preview error: {e}")
+        import traceback
+        traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.post("/start-download")
@@ -462,6 +499,10 @@ async def download_file(filename: str):
         filename = os.path.basename(unquote(filename))
         path = TEMP_DOWNLOAD_FOLDER / filename
 
+        print(f"Download requested: {filename}")
+        print(f"Full path: {path}")
+        print(f"File exists: {path.exists()}")
+
         if not path.exists():
             return JSONResponse(status_code=404, content={"error": "File not found"})
 
@@ -477,21 +518,25 @@ async def download_file(filename: str):
         else:
             media_type = 'application/octet-stream'
 
-        # Force download with proper filename
-        encoded_filename = quote(filename.encode('utf-8'))
+        # FIXED: Simple filename encoding without ord() errors
+        # Just use the filename as-is for the Content-Disposition header
+        # The browser will handle the encoding
         
         return FileResponse(
             path=path,
             media_type=media_type,
             headers={
-                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
+                "Content-Disposition": f"attachment; filename=\"{filename}\"",
                 "Content-Length": str(file_size),
                 "Access-Control-Allow-Origin": "*",
+                "Access-Control-Expose-Headers": "Content-Disposition",
             }
         )
         
     except Exception as e:
         print(f"Download error: {e}")
+        import traceback
+        traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/thumbnails/{filename}")
