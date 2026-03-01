@@ -173,6 +173,14 @@ def auto_cleanup():
 
 threading.Thread(target=auto_cleanup, daemon=True).start()
 
+def sanitize_filename(filename):
+    """Remove invalid characters from filename but keep it readable"""
+    # Replace problematic characters but keep the filename intact
+    filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+    # Remove extra spaces
+    filename = re.sub(r'\s+', ' ', filename)
+    return filename.strip()
+
 def download_task(job_id, url, format_option):
     def progress_hook(d):
         with progress_lock:
@@ -204,7 +212,7 @@ def download_task(job_id, url, format_option):
     
     actual_format = format_map.get(format_option, "best")
 
-    # Base options - Use temp folder
+    # Base options - Use temp folder with sanitized filename
     ydl_opts = {
         'outtmpl': str(TEMP_DOWNLOAD_FOLDER / '%(title)s.%(ext)s'),
         'format': actual_format,
@@ -214,6 +222,8 @@ def download_task(job_id, url, format_option):
         'extract_flat': False,
         'ignoreerrors': True,
         'no_color': True,
+        # Add windows compatibility
+        'windowsfilenames': True,  # This helps with Windows compatibility
     }
 
     # Add post-processors for specific formats
@@ -241,7 +251,7 @@ def download_task(job_id, url, format_option):
             if 'entries' in info and info['entries']:
                 info = info['entries'][0]
             
-            # Get the actual filename that will be created
+            # Get the sanitized filename that will be created
             video_filename = ydl.prepare_filename(info)
             video_basename = os.path.basename(video_filename)
             
@@ -261,6 +271,7 @@ def download_task(job_id, url, format_option):
                     }
             
             print(f"Starting download: {info.get('title', 'Unknown')}")
+            print(f"Expected filename: {video_basename}")
             
             # Download the video
             ydl.download([url])
@@ -268,22 +279,26 @@ def download_task(job_id, url, format_option):
             # Wait a moment for file to be fully written
             time.sleep(2)
             
-            # Find the actual file
+            # Find the actual file (sometimes yt-dlp changes the filename)
             actual_path = TEMP_DOWNLOAD_FOLDER / video_basename
             if not actual_path.exists():
-                # Try to find the actual file
+                # Try to find the actual file by extension and modification time
                 if format_option == "audio":
                     files = list(TEMP_DOWNLOAD_FOLDER.glob("*.mp3")) + list(TEMP_DOWNLOAD_FOLDER.glob("*.m4a"))
                 else:
-                    files = list(TEMP_DOWNLOAD_FOLDER.glob("*.mp4")) + list(TEMP_DOWNLOAD_FOLDER.glob("*.webm"))
+                    files = list(TEMP_DOWNLOAD_FOLDER.glob("*.mp4")) + list(TEMP_DOWNLOAD_FOLDER.glob("*.webm")) + list(TEMP_DOWNLOAD_FOLDER.glob("*.mkv"))
                 
-                files = [f for f in files if not any(ext in f.name for ext in ['.part', '.ytdl'])]
+                # Filter out partial/temp files
+                files = [f for f in files if not any(ext in f.name for ext in ['.part', '.ytdl', '.temp'])]
                 
                 if files:
+                    # Get the most recently modified file
                     files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-                    video_basename = files[0].name
                     actual_path = files[0]
+                    video_basename = actual_path.name
                     print(f"Found actual file: {video_basename}")
+                else:
+                    raise Exception("Downloaded file not found")
             
             file_size = actual_path.stat().st_size
             
@@ -306,7 +321,7 @@ def download_task(job_id, url, format_option):
                 except Exception as e:
                     print(f"Thumbnail download failed: {e}")
             
-            # Store metadata
+            # Store metadata with the actual filename
             file_metadata[video_basename] = {
                 'thumbnail': thumbnail_url,
                 'title': info.get('title', 'Unknown'),
@@ -317,7 +332,7 @@ def download_task(job_id, url, format_option):
                 'download_url': f"/download-file/{video_basename}"
             }
             
-            # Mark as finished
+            # Mark as finished with the correct filename
             with progress_lock:
                 progress_store[job_id] = {
                     "status": "finished",
@@ -364,10 +379,9 @@ async def preview_video(url: str = Form(...)):
         if 'entries' in info and info['entries']:
             info = info['entries'][0]
 
-        # Format duration - FIXED: Handle float values properly
+        # Format duration
         duration = info.get('duration')
         if duration is not None:
-            # Convert to int safely
             try:
                 duration = int(float(duration))
                 minutes = duration // 60
@@ -404,7 +418,6 @@ async def preview_video(url: str = Form(...)):
         if not thumbnail and info.get('thumbnails'):
             thumbnails = info['thumbnails']
             if thumbnails:
-                # Get the last thumbnail (usually highest quality)
                 thumbnail = thumbnails[-1].get('url')
 
         # Format view count
@@ -482,6 +495,13 @@ async def list_files():
             ]):
                 # Only show files from last hour
                 if time.time() - f.stat().st_mtime < 3600:
+                    # Also store in metadata if not already there
+                    if f.name not in file_metadata:
+                        file_metadata[f.name] = {
+                            'title': f.name.rsplit('.', 1)[0],
+                            'filename': f.name,
+                            'file_size': f.stat().st_size
+                        }
                     files.append(f.name)
         
         return JSONResponse(
@@ -496,15 +516,48 @@ async def list_files():
 async def download_file(filename: str):
     """Download a file to the user's device"""
     try:
-        filename = os.path.basename(unquote(filename))
+        # URL decode the filename
+        filename = unquote(filename)
+        filename = os.path.basename(filename)
+        
+        print(f"Looking for file: {filename}")
+        
+        # First try exact match
         path = TEMP_DOWNLOAD_FOLDER / filename
-
-        print(f"Download requested: {filename}")
-        print(f"Full path: {path}")
-        print(f"File exists: {path.exists()}")
-
+        
         if not path.exists():
-            return JSONResponse(status_code=404, content={"error": "File not found"})
+            print(f"Exact match not found: {path}")
+            
+            # Try to find by partial match (remove special characters)
+            # Get all mp4/mp3 files
+            all_files = list(TEMP_DOWNLOAD_FOLDER.glob("*.mp4")) + \
+                       list(TEMP_DOWNLOAD_FOLDER.glob("*.mp3")) + \
+                       list(TEMP_DOWNLOAD_FOLDER.glob("*.webm"))
+            
+            # Get the base filename without extension
+            base_name = filename.rsplit('.', 1)[0] if '.' in filename else filename
+            
+            # Look for files that start with the base name
+            matches = []
+            for f in all_files:
+                if f.name.startswith(base_name) or base_name in f.name:
+                    matches.append(f)
+            
+            if matches:
+                # Get the most recent match
+                matches.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+                path = matches[0]
+                filename = path.name
+                print(f"Found match: {filename}")
+            else:
+                # Last resort: return the most recent file
+                if all_files:
+                    all_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+                    path = all_files[0]
+                    filename = path.name
+                    print(f"Using most recent file: {filename}")
+                else:
+                    return JSONResponse(status_code=404, content={"error": "File not found"})
 
         file_size = path.stat().st_size
         
@@ -518,15 +571,18 @@ async def download_file(filename: str):
         else:
             media_type = 'application/octet-stream'
 
-        # FIXED: Simple filename encoding without ord() errors
-        # Just use the filename as-is for the Content-Disposition header
-        # The browser will handle the encoding
+        print(f"Serving file: {filename} ({file_size:,} bytes)")
+        
+        # Simple filename for header
+        safe_filename = filename.encode('ascii', 'ignore').decode('ascii')
+        if not safe_filename:
+            safe_filename = "video.mp4"
         
         return FileResponse(
             path=path,
             media_type=media_type,
             headers={
-                "Content-Disposition": f"attachment; filename=\"{filename}\"",
+                "Content-Disposition": f"attachment; filename=\"{safe_filename}\"",
                 "Content-Length": str(file_size),
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Expose-Headers": "Content-Disposition",
@@ -548,6 +604,15 @@ async def get_thumbnail(filename: str):
         return FileResponse(path, media_type='image/jpeg')
     
     return JSONResponse(status_code=404, content={"error": "Thumbnail not found"})
+
+@app.get("/device-info")
+async def device_info():
+    """Return device info for compatibility"""
+    return {
+        "device": "web",
+        "file_count": len(list(TEMP_DOWNLOAD_FOLDER.glob("*"))),
+        "message": "Files are downloaded directly to your device"
+    }
 
 @app.get("/health")
 async def health_check():
