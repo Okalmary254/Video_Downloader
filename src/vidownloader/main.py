@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 app = FastAPI()
 
 # Base paths
-BASE_DIR = Path(__file__).resolve().parent  # project root (main.py location)
+BASE_DIR = Path(__file__).resolve().parent.parent.parent  # project root (main.py location)
 WEB_DIR = BASE_DIR / "web"
 DOWNLOAD_FOLDER = BASE_DIR / "downloads"
 THUMBNAIL_FOLDER = BASE_DIR / "thumbnails"
