@@ -606,7 +606,6 @@ async def download_file(filename: str, request: Request):
             media_type = mimetypes.guess_type(str(path))[0] or 'application/octet-stream'
 
         # For the Content-Disposition header, handle different scenarios
-        # If it's a media file, we want to play it inline on mobile
         user_agent = request.headers.get("user-agent", "").lower()
         is_mobile = any(device in user_agent for device in ['iphone', 'android', 'mobile'])
         
@@ -616,13 +615,35 @@ async def download_file(filename: str, request: Request):
         else:
             disposition_type = "attachment"
         
-        # Create ASCII-safe filename for header
-        ascii_filename = ''.join(c for c in filename if ord(c) < 128)
-        if not ascii_filename:
-            ascii_filename = "video.mp4"
+        # Create a safe filename for the header - FIXED VERSION
+        # Instead of iterating character by character, use encode/decode
+        try:
+            # Try to encode as ASCII, replacing non-ASCII chars
+            ascii_filename = filename.encode('ascii', 'replace').decode('ascii')
+            # Replace the replacement character with underscore
+            ascii_filename = ascii_filename.replace('?', '_').replace('�', '_')
+        except:
+            # If that fails, use a simple approach with regex
+            ascii_filename = re.sub(r'[^\x00-\x7F]+', '_', filename)
+        
+        if not ascii_filename or ascii_filename.strip() == '':
+            # If we end up with empty string, use a default
+            if filename.endswith('.mp4'):
+                ascii_filename = 'video.mp4'
+            elif filename.endswith('.mp3'):
+                ascii_filename = 'audio.mp3'
+            else:
+                ascii_filename = 'file.mp4'
+        
+        # Ensure the extension is preserved
+        if not ascii_filename.endswith(('.mp4', '.mp3', '.jpg', '.jpeg', '.png')):
+            # Add the original extension
+            ext = Path(filename).suffix
+            if ext:
+                ascii_filename = Path(ascii_filename).stem + ext
         
         # Encode for header
-        encoded_filename = quote(ascii_filename)
+        encoded_filename = quote(filename.encode('utf-8'))
         
         # Create response with proper headers for mobile
         response = FileResponse(
@@ -646,11 +667,102 @@ async def download_file(filename: str, request: Request):
         print(f"Download error: {e}")
         import traceback
         traceback.print_exc()
+        
+        # Fallback to a simple file serving without fancy headers
+        try:
+            # Last resort - serve the file with minimal headers
+            path = DOWNLOAD_FOLDER / os.path.basename(unquote(filename))
+            if path.exists():
+                return FileResponse(
+                    path=path,
+                    media_type='application/octet-stream',
+                    headers={
+                        "Access-Control-Allow-Origin": "*",
+                    }
+                )
+        except:
+            pass
+            
         return JSONResponse(
             status_code=500,
             content={"error": f"Download failed: {str(e)}"}
         )
 
+# Also add the streaming endpoint
+@app.api_route("/stream/{filename:path}", methods=["GET", "HEAD"])
+async def stream_file(filename: str, request: Request):
+    """Stream video for mobile playback with range support"""
+    try:
+        filename = os.path.basename(unquote(filename))
+        path = DOWNLOAD_FOLDER / filename
+
+        if not path.exists():
+            return JSONResponse(status_code=404, content={"error": "File not found"})
+
+        file_size = path.stat().st_size
+        range_header = request.headers.get("range")
+        
+        # Determine media type
+        if filename.endswith('.mp4'):
+            media_type = 'video/mp4'
+        elif filename.endswith('.mp3'):
+            media_type = 'audio/mpeg'
+        else:
+            media_type = 'video/mp4'
+
+        if range_header:
+            # Handle range requests for video streaming
+            byte1, byte2 = 0, None
+            match = re.search(r'bytes=(\d+)-(\d*)', range_header)
+            if match:
+                byte1 = int(match.group(1))
+                if match.group(2):
+                    byte2 = int(match.group(2))
+            
+            if byte2 is None:
+                byte2 = file_size - 1
+            
+            length = byte2 - byte1 + 1
+            
+            with open(path, 'rb') as f:
+                f.seek(byte1)
+                data = f.read(length)
+            
+            response = Response(
+                content=data,
+                status_code=206,
+                media_type=media_type,
+                headers={
+                    "Content-Range": f"bytes {byte1}-{byte2}/{file_size}",
+                    "Accept-Ranges": "bytes",
+                    "Content-Length": str(length),
+                    "Access-Control-Allow-Origin": "*",
+                }
+            )
+            return response
+        else:
+            # Full file request - use inline for mobile
+            user_agent = request.headers.get("user-agent", "").lower()
+            is_mobile = any(device in user_agent for device in ['iphone', 'android', 'mobile'])
+            
+            disposition = "inline" if is_mobile else "attachment"
+            encoded_filename = quote(filename.encode('utf-8'))
+            
+            return FileResponse(
+                path=path,
+                media_type=media_type,
+                headers={
+                    "Content-Disposition": f"{disposition}; filename*=UTF-8''{encoded_filename}",
+                    "Accept-Ranges": "bytes",
+                    "Access-Control-Allow-Origin": "*",
+                }
+            )
+            
+    except Exception as e:
+        print(f"Stream error: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    
+    
 # Also add a streaming endpoint for better mobile support
 @app.api_route("/stream/{filename:path}", methods=["GET", "HEAD"])
 async def stream_file(filename: str, request: Request):

@@ -454,10 +454,10 @@ async function loadFiles() {
       const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
       btn.onclick = (e) => {
-      e.stopPropagation();
-      const filename = encodeURIComponent(file.name);
+        e.stopPropagation();
+        const filename = encodeURIComponent(metadata.filename || filename);
     
-      if (isMobile && file.name.endsWith('.mp4')) {
+      if (isMobile && (filename.endsWith('.mp4') || filename.endsWith('.webm'))) {
           // On mobile, open in new tab for better playback
           window.open(`/stream/${filename}`, '_blank');
       } else {
