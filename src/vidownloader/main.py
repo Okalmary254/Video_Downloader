@@ -45,8 +45,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent  # project root
 WEB_DIR = BASE_DIR / "web"
 TEMP_DOWNLOAD_FOLDER = BASE_DIR / "temp_downloads"  # Temporary storage
 THUMBNAIL_FOLDER = BASE_DIR / "thumbnails"
-COOKIES_FILE_PATH = os.path.join(os.path.dirname(__file__), "cookies.txt")
+COOKIES_FILE_PATH = BASE_DIR / "cookies.txt"
 
+print(f"looking for cookies file at: {COOKIES_FILE_PATH}")
+print(f"cookie file exists: {COOKIES_FILE_PATH.exists()}")
 print(f"BASE_DIR: {BASE_DIR}")
 print(f"WEB_DIR: {WEB_DIR}")
 print(f"TEMP_DOWNLOAD_FOLDER: {TEMP_DOWNLOAD_FOLDER}")
@@ -256,7 +258,7 @@ def download_task(job_id, url, format_option):
         'sleep_interval': 0,  
         'max_sleep_interval': 0,
         'sleep_interval_requests': 0,
-        'cookiefile': COOKIES_FILE_PATH
+        'cookiefile': str(COOKIES_FILE_PATH),
     }
 
     # Add post-processors for specific formats
@@ -392,6 +394,7 @@ async def preview_video(url: str = Form(...)):
     """Get video information without downloading"""
     try:
         print(f"Preview request for URL: {url}")
+        print(f"using cookies file: {COOKIES_FILE_PATH} (exists: {COOKIES_FILE_PATH.exists()})")
         
         ydl_opts = {
             'quiet': True,
@@ -400,6 +403,7 @@ async def preview_video(url: str = Form(...)):
             'ignoreerrors': True,
             'no_color': True,
             'geo_bypass': True,
+            'cookiefile': str(COOKIES_FILE_PATH),
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -599,17 +603,6 @@ async def download_file(filename: str):
                 while chunk := await f.read(1024 * 1024):  # 1 MB chunks
                     yield chunk
 
-        # return StreamingResponse(
-        #     interfile(),
-        #     media_type='application/octet-stream',
-        #     headers={
-        #         "Content-Disposition": f"attachment; filename=\"{filename}\"",
-        #         "Content-Length": str(file_size),
-
-        #     }
-
-        # )     
-
         # Determine media type
         if filename.endswith('.mp4'):
             media_type = 'video/mp4'
@@ -662,6 +655,64 @@ async def device_info():
         "file_count": len(list(TEMP_DOWNLOAD_FOLDER.glob("*"))),
         "message": "Files are downloaded directly to your device"
     }
+
+@app.get("/debug/cookies")
+async def debug_cookies():
+    """Detailed cookie debugging information"""
+    result = {
+        "cookies_file_path": str(COOKIES_FILE_PATH),
+        "cookies_file_exists": COOKIES_FILE_PATH.exists(),
+        "cookies_file_size": None,
+        "cookies_file_permissions": None,
+        "cookies_file_format_valid": False,
+        "cookies_first_10_lines": [],
+        "cookies_in_ydl_format": False,
+    }
+    
+    if COOKIES_FILE_PATH.exists():
+        result["cookies_file_size"] = COOKIES_FILE_PATH.stat().st_size
+        
+        # Check file permissions
+        try:
+            with open(COOKIES_FILE_PATH, 'r') as f:
+                lines = f.readlines()
+                result["cookies_file_permissions"] = "readable"
+                result["cookies_first_10_lines"] = [line.strip() for line in lines[:10] if line.strip()]
+                
+                # Check if it's in Netscape format
+                if lines and lines[0].strip().startswith('# Netscape'):
+                    result["cookies_file_format_valid"] = True
+        except Exception as e:
+            result["cookies_file_permissions"] = f"error: {str(e)}"
+    
+    # Test if yt-dlp can load the cookies
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'cookiefile': str(COOKIES_FILE_PATH),
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Just test if cookies load without error
+            result["cookies_in_ydl_format"] = True
+    except Exception as e:
+        result["cookies_in_ydl_format"] = False
+        result["ydl_error"] = str(e)
+    
+    # Try a test extraction with cookies
+    try:
+        test_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        ydl_opts = {
+            'quiet': True,
+            'cookiefile': str(COOKIES_FILE_PATH),
+            'extract_flat': True,  # Don't download, just extract info
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(test_url, download=False)
+            result["test_extraction"] = "successful" if info else "failed"
+    except Exception as e:
+        result["test_extraction"] = f"failed: {str(e)}"
+    
+    return result
 
 @app.get("/health")
 async def health_check():
