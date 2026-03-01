@@ -446,11 +446,24 @@ async function loadFiles() {
       
       div.appendChild(infoSpan);
       
+      // In your loadFiles function, modify the download button to check device
       const btn = document.createElement('button');
       btn.innerHTML = '<i class="fas fa-download"></i> Save';
+
+      // Check if mobile for better playback
+      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
       btn.onclick = (e) => {
-        e.stopPropagation();
-        window.open(`/download-file/${encodeURIComponent(filename)}`, '_blank');
+      e.stopPropagation();
+      const filename = encodeURIComponent(file.name);
+    
+      if (isMobile && file.name.endsWith('.mp4')) {
+          // On mobile, open in new tab for better playback
+          window.open(`/stream/${filename}`, '_blank');
+      } else {
+          // On desktop, download normally
+          window.open(`/download-file/${filename}`, '_blank');
+      }
       };
       
       div.appendChild(btn);

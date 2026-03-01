@@ -1,6 +1,6 @@
 from email.quoprimime import quote
 from pathlib import Path
-from fastapi import FastAPI, Form, BackgroundTasks, Response
+from fastapi import FastAPI, Form, BackgroundTasks, Response, Request
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 import yt_dlp
 import os
@@ -557,7 +557,7 @@ async def list_files():
         )
 
 @app.api_route("/download-file/{filename:path}", methods=["GET", "HEAD"])
-async def download_file(filename: str):
+async def download_file(filename: str, request: Request):
     """Download a file with proper headers for all devices"""
     try:
         # Prevent directory traversal
@@ -590,37 +590,53 @@ async def download_file(filename: str):
         file_size = path.stat().st_size
         print(f"Serving file: {filename} ({file_size} bytes)")
 
-        # Determine media type
-        media_type = mimetypes.guess_type(str(path))[0]
-        if not media_type:
-            if filename.endswith('.mp4'):
-                media_type = 'video/mp4'
-            elif filename.endswith('.mp3'):
-                media_type = 'audio/mpeg'
-            elif filename.endswith('.webm'):
-                media_type = 'video/webm'
-            else:
-                media_type = 'application/octet-stream'
+        # Determine media type for mobile playback
+        media_type = None
+        if filename.endswith('.mp4'):
+            media_type = 'video/mp4'
+        elif filename.endswith('.mp3'):
+            media_type = 'audio/mpeg'
+        elif filename.endswith('.webm'):
+            media_type = 'video/webm'
+        elif filename.endswith('.jpg') or filename.endswith('.jpeg'):
+            media_type = 'image/jpeg'
+        elif filename.endswith('.png'):
+            media_type = 'image/png'
+        else:
+            media_type = mimetypes.guess_type(str(path))[0] or 'application/octet-stream'
 
-        # For the Content-Disposition header, we need to handle special characters
-        # Use a simple ASCII fallback for the filename in the header
+        # For the Content-Disposition header, handle different scenarios
+        # If it's a media file, we want to play it inline on mobile
+        user_agent = request.headers.get("user-agent", "").lower()
+        is_mobile = any(device in user_agent for device in ['iphone', 'android', 'mobile'])
+        
+        # On mobile, we want to play the video inline, not download
+        if is_mobile and media_type.startswith('video/'):
+            disposition_type = "inline"
+        else:
+            disposition_type = "attachment"
+        
+        # Create ASCII-safe filename for header
         ascii_filename = ''.join(c for c in filename if ord(c) < 128)
-        if not ascii_filename:  # If no ASCII chars, use a default
+        if not ascii_filename:
             ascii_filename = "video.mp4"
         
-        # Create response with proper headers
+        # Encode for header
+        encoded_filename = quote(ascii_filename)
+        
+        # Create response with proper headers for mobile
         response = FileResponse(
             path=path,
             media_type=media_type,
-            filename=ascii_filename,
             headers={
-                "Content-Disposition": f"attachment; filename=\"{ascii_filename}\"",
+                "Content-Disposition": f"{disposition_type}; filename=\"{ascii_filename}\"; filename*=UTF-8''{encoded_filename}",
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
                 "Access-Control-Allow-Headers": "*",
                 "Content-Length": str(file_size),
                 "Cache-Control": "no-cache",
                 "Accept-Ranges": "bytes",
+                "Content-Transfer-Encoding": "binary",
             }
         )
         
@@ -634,6 +650,76 @@ async def download_file(filename: str):
             status_code=500,
             content={"error": f"Download failed: {str(e)}"}
         )
+
+# Also add a streaming endpoint for better mobile support
+@app.api_route("/stream/{filename:path}", methods=["GET", "HEAD"])
+async def stream_file(filename: str, request: Request):
+    """Stream video for mobile playback with range support"""
+    try:
+        filename = os.path.basename(unquote(filename))
+        path = DOWNLOAD_FOLDER / filename
+
+        if not path.exists():
+            return JSONResponse(status_code=404, content={"error": "File not found"})
+
+        file_size = path.stat().st_size
+        range_header = request.headers.get("range")
+        
+        # Determine media type
+        if filename.endswith('.mp4'):
+            media_type = 'video/mp4'
+        elif filename.endswith('.mp3'):
+            media_type = 'audio/mpeg'
+        else:
+            media_type = 'video/mp4'
+
+        if range_header:
+            # Handle range requests for video streaming
+            byte1, byte2 = 0, None
+            match = re.search(r'bytes=(\d+)-(\d*)', range_header)
+            if match:
+                byte1 = int(match.group(1))
+                if match.group(2):
+                    byte2 = int(match.group(2))
+            
+            if byte2 is None:
+                byte2 = file_size - 1
+            
+            length = byte2 - byte1 + 1
+            
+            with open(path, 'rb') as f:
+                f.seek(byte1)
+                data = f.read(length)
+            
+            response = Response(
+                content=data,
+                status_code=206,
+                media_type=media_type,
+                headers={
+                    "Content-Range": f"bytes {byte1}-{byte2}/{file_size}",
+                    "Accept-Ranges": "bytes",
+                    "Content-Length": str(length),
+                    "Access-Control-Allow-Origin": "*",
+                }
+            )
+            return response
+        else:
+            # Full file request
+            encoded_filename = quote(filename)
+            return FileResponse(
+                path=path,
+                media_type=media_type,
+                headers={
+                    "Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}",
+                    "Accept-Ranges": "bytes",
+                    "Access-Control-Allow-Origin": "*",
+                }
+            )
+            
+    except Exception as e:
+        print(f"Stream error: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    
 
 @app.options("/download-file/{filename:path}")
 async def download_file_options(filename: str):
