@@ -186,14 +186,23 @@ AUTO_DELETE_AFTER = 3600  # 1 hour
 def auto_cleanup():
     while True:
         now = time.time()
-        # Clean downloads
-        for file in os.listdir(DOWNLOAD_FOLDER):
-            path = DOWNLOAD_FOLDER / file
-            if path.is_file():
-                if now - path.stat().st_mtime > AUTO_DELETE_AFTER:
+        # Clean laptop downloads
+        for file in LAPTOP_DOWNLOAD_FOLDER.glob("*"):
+            if file.is_file():
+                if now - file.stat().st_mtime > AUTO_DELETE_AFTER:
                     try:
-                        path.unlink()
-                        print(f"Cleaned up old file: {file}")
+                        file.unlink()
+                        print(f"Cleaned up old laptop file: {file.name}")
+                    except:
+                        pass
+        
+        # Clean mobile downloads
+        for file in MOBILE_DOWNLOAD_FOLDER.glob("*"):
+            if file.is_file():
+                if now - file.stat().st_mtime > AUTO_DELETE_AFTER:
+                    try:
+                        file.unlink()
+                        print(f"Cleaned up old mobile file: {file.name}")
                     except:
                         pass
         
@@ -249,9 +258,9 @@ def download_task(job_id, url, format_option, device_folder):
     
     actual_format = format_map.get(format_option, "best")
 
-    # Base options
+    # Base options - FIXED: Use device_folder instead of DOWNLOAD_FOLDER
     ydl_opts = {
-        'outtmpl': str(DOWNLOAD_FOLDER / '%(title)s.%(ext)s'),
+        'outtmpl': str(device_folder / '%(title)s.%(ext)s'),
         'format': actual_format,
         'progress_hooks': [progress_hook],
         'quiet': True,
@@ -305,14 +314,14 @@ def download_task(job_id, url, format_option, device_folder):
             # Wait a moment for file to be fully written
             time.sleep(1)
             
-            # Verify file exists
-            actual_path = DOWNLOAD_FOLDER / video_basename
+            # Verify file exists in device folder
+            actual_path = device_folder / video_basename
             if not actual_path.exists():
-                # Try to find the actual file
-                files = list(DOWNLOAD_FOLDER.glob("*.mp4")) + list(DOWNLOAD_FOLDER.glob("*.mp3"))
+                # Try to find the actual file in device folder
+                files = list(device_folder.glob("*.mp4")) + list(device_folder.glob("*.mp3"))
                 if files:
                     video_basename = files[-1].name
-                    print(f"Found actual file: {video_basename}")
+                    print(f"Found actual file: {video_basename} in {device_folder.name}")
             
             # Download and save thumbnail
             if info.get('thumbnail'):
@@ -345,7 +354,7 @@ def download_task(job_id, url, format_option, device_folder):
                         with open(thumb_path, 'wb') as f:
                             f.write(response.read())
                         
-                        # Store metadata
+                        # Store metadata with device info
                         file_metadata[video_basename] = {
                             'thumbnail': f"/thumbnails/{thumb_filename}",
                             'title': info.get('title', 'Unknown'),
@@ -356,7 +365,7 @@ def download_task(job_id, url, format_option, device_folder):
                             'download_path': str(device_folder / video_basename)
                         }
                         
-                        print(f"Thumbnail saved for: {video_basename}")
+                        print(f"Thumbnail saved for: {video_basename} ({device_folder.name})")
                 except Exception as e:
                     print(f"Thumbnail download failed: {e}")
             
@@ -365,10 +374,11 @@ def download_task(job_id, url, format_option, device_folder):
                 progress_store[job_id] = {
                     "status": "finished",
                     "filename": video_basename,
-                    "title": info.get('title', 'Unknown')
+                    "title": info.get('title', 'Unknown'),
+                    "device": device_folder.name
                 }
             
-            print(f"Download completed: {video_basename}")
+            print(f"Download completed: {video_basename} on {device_folder.name}")
             
     except Exception as e:
         with progress_lock:
@@ -538,30 +548,62 @@ async def start_download(background_tasks: BackgroundTasks,
 
     job_id = str(uuid.uuid4())
     device_folder = get_device_folder(request)
+    device_type = get_device_type(request.headers.get("user-agent", ""))
 
     with progress_lock:
         progress_store[job_id] = {
             "status": "starting",
             "percent": "0",
-            "message": "Initializing download..."
+            "message": f"Initializing download for {device_type}...",
+            "device": device_type
         }
 
     background_tasks.add_task(download_task, job_id, url.strip(), quality, device_folder)
 
-    return {"job_id": job_id}
+    return {"job_id": job_id, "device": device_type}
 
 @app.get("/progress/{job_id}")
-async def get_progress(job_id: str):
+async def get_progress(job_id: str, request: Request):
     with progress_lock:
         if job_id in progress_store:
-            return progress_store[job_id]
-    return {"status": "unknown"}
+            # Add CORS headers for mobile
+            return JSONResponse(
+                content=progress_store[job_id],
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "GET, OPTIONS",
+                    "Access-Control-Allow-Headers": "*",
+                }
+            )
+    return JSONResponse(
+        content={"status": "unknown"},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
+
+@app.options("/progress/{job_id}")
+async def progress_options(job_id: str):
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
 
 @app.get("/files")
-async def list_files():
+async def list_files(request: Request):
+    """List files only for the requesting device"""
     try:
+        device_folder = get_device_folder(request)
+        device_type = get_device_type(request.headers.get("user-agent", ""))
+        
         files = []
-        for f in DOWNLOAD_FOLDER.glob("*"):
+        for f in device_folder.glob("*"):
             if f.is_file() and not any([
                 f.name.endswith(('.jpg', '.jpeg', '.png', '.webp', '.part', '.ytdl')),
                 f.name.startswith('.')
@@ -569,21 +611,44 @@ async def list_files():
                 files.append(f.name)
         
         # Sort by modification time (newest first)
-        files_with_time = [(f, (DOWNLOAD_FOLDER / f).stat().st_mtime) for f in files]
+        files_with_time = [(f, (device_folder / f).stat().st_mtime) for f in files]
         files_with_time.sort(key=lambda x: x[1], reverse=True)
         
-        return [f[0] for f in files_with_time]
+        print(f"Serving {device_type} files: {[f[0] for f in files_with_time]}")
+        
+        return JSONResponse(
+            content=[f[0] for f in files_with_time],
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+            }
+        )
         
     except Exception as e:
         print(f"Error listing files: {e}")
         return JSONResponse(
             status_code=500,
-            content={"error": str(e)}
+            content={"error": str(e)},
+            headers={
+                "Access-Control-Allow-Origin": "*",
+            }
         )
+
+@app.options("/files")
+async def files_options():
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
 
 @app.api_route("/download-file/{filename:path}", methods=["GET", "HEAD"])
 async def download_file(filename: str, request: Request):
-    """Download a file with proper headers for all devices"""
+    """Download a file from the appropriate device folder"""
     try:
         # Prevent directory traversal
         filename = os.path.basename(filename)
@@ -591,31 +656,25 @@ async def download_file(filename: str, request: Request):
         # URL decode the filename first (if it was encoded)
         filename = unquote(filename)
         
-        path = DOWNLOAD_FOLDER / filename
+        # Get device-specific folder
+        device_folder = get_device_folder(request)
+        path = device_folder / filename
 
-        print(f"Download requested: {filename}")
+        print(f"Download requested: {filename} from {device_folder.name}")
         print(f"Full path: {path}")
         print(f"File exists: {path.exists()}")
 
         if not path.exists():
-            # Try to find the file with different extensions
-            stem = Path(filename).stem
-            files = list(DOWNLOAD_FOLDER.glob(f"{stem}.*"))
-            if files:
-                path = files[0]
-                filename = path.name
-                print(f"Found alternative: {filename}")
-            else:
-                return JSONResponse(
-                    status_code=404,
-                    content={"error": f"File not found: {filename}"}
-                )
+            return JSONResponse(
+                status_code=404,
+                content={"error": f"File not found for {device_folder.name}"}
+            )
 
         # Get file size for logging
         file_size = path.stat().st_size
-        print(f"Serving file: {filename} ({file_size} bytes)")
+        print(f"Serving file: {filename} ({file_size} bytes) from {device_folder.name}")
 
-        # Determine media type for mobile playback
+        # Determine media type
         media_type = None
         if filename.endswith('.mp4'):
             media_type = 'video/mp4'
@@ -630,59 +689,17 @@ async def download_file(filename: str, request: Request):
         else:
             media_type = mimetypes.guess_type(str(path))[0] or 'application/octet-stream'
 
-        # For the Content-Disposition header, handle different scenarios
-        user_agent = request.headers.get("user-agent", "").lower()
-        is_mobile = any(device in user_agent for device in ['iphone', 'android', 'mobile'])
-        
-        # On mobile, we want to play the video inline, not download
-        if is_mobile and media_type.startswith('video/'):
-            disposition_type = "inline"
-        else:
-            disposition_type = "attachment"
-        
-        # Create a safe filename for the header - FIXED VERSION
-        # Instead of iterating character by character, use encode/decode
-        try:
-            # Try to encode as ASCII, replacing non-ASCII chars
-            ascii_filename = filename.encode('ascii', 'replace').decode('ascii')
-            # Replace the replacement character with underscore
-            ascii_filename = ascii_filename.replace('?', '_').replace('�', '_')
-        except:
-            # If that fails, use a simple approach with regex
-            ascii_filename = re.sub(r'[^\x00-\x7F]+', '_', filename)
-        
-        if not ascii_filename or ascii_filename.strip() == '':
-            # If we end up with empty string, use a default
-            if filename.endswith('.mp4'):
-                ascii_filename = 'video.mp4'
-            elif filename.endswith('.mp3'):
-                ascii_filename = 'audio.mp3'
-            else:
-                ascii_filename = 'file.mp4'
-        
-        # Ensure the extension is preserved
-        if not ascii_filename.endswith(('.mp4', '.mp3', '.jpg', '.jpeg', '.png')):
-            # Add the original extension
-            ext = Path(filename).suffix
-            if ext:
-                ascii_filename = Path(ascii_filename).stem + ext
-        
-        # Encode for header
-        encoded_filename = quote(filename.encode('utf-8'))
-        
-        # Create response with proper headers for mobile
+        # Create response
         response = FileResponse(
             path=path,
             media_type=media_type,
             headers={
-                "Content-Disposition": f"{disposition_type}; filename=\"{ascii_filename}\"; filename*=UTF-8''{encoded_filename}",
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
                 "Access-Control-Allow-Headers": "*",
                 "Content-Length": str(file_size),
                 "Cache-Control": "no-cache",
                 "Accept-Ranges": "bytes",
-                "Content-Transfer-Encoding": "binary",
             }
         )
         
@@ -692,246 +709,79 @@ async def download_file(filename: str, request: Request):
         print(f"Download error: {e}")
         import traceback
         traceback.print_exc()
-        
-        # Fallback to a simple file serving without fancy headers
-        try:
-            # Last resort - serve the file with minimal headers
-            path = DOWNLOAD_FOLDER / os.path.basename(unquote(filename))
-            if path.exists():
-                return FileResponse(
-                    path=path,
-                    media_type='application/octet-stream',
-                    headers={
-                        "Access-Control-Allow-Origin": "*",
-                    }
-                )
-        except:
-            pass
-            
         return JSONResponse(
             status_code=500,
             content={"error": f"Download failed: {str(e)}"}
         )
 
-# Also add the streaming endpoint
-@app.api_route("/stream/{filename:path}", methods=["GET", "HEAD"])
-async def stream_file(filename: str, request: Request):
-    """Stream video for mobile playback with range support"""
-    try:
-        filename = os.path.basename(unquote(filename))
-        path = DOWNLOAD_FOLDER / filename
-
-        if not path.exists():
-            return JSONResponse(status_code=404, content={"error": "File not found"})
-
-        file_size = path.stat().st_size
-        range_header = request.headers.get("range")
-        
-        # Determine media type
-        if filename.endswith('.mp4'):
-            media_type = 'video/mp4'
-        elif filename.endswith('.mp3'):
-            media_type = 'audio/mpeg'
-        else:
-            media_type = 'video/mp4'
-
-        if range_header:
-            # Handle range requests for video streaming
-            byte1, byte2 = 0, None
-            match = re.search(r'bytes=(\d+)-(\d*)', range_header)
-            if match:
-                byte1 = int(match.group(1))
-                if match.group(2):
-                    byte2 = int(match.group(2))
-            
-            if byte2 is None:
-                byte2 = file_size - 1
-            
-            length = byte2 - byte1 + 1
-            
-            with open(path, 'rb') as f:
-                f.seek(byte1)
-                data = f.read(length)
-            
-            response = Response(
-                content=data,
-                status_code=206,
-                media_type=media_type,
-                headers={
-                    "Content-Range": f"bytes {byte1}-{byte2}/{file_size}",
-                    "Accept-Ranges": "bytes",
-                    "Content-Length": str(length),
-                    "Access-Control-Allow-Origin": "*",
-                }
-            )
-            return response
-        else:
-            # Full file request - use inline for mobile
-            user_agent = request.headers.get("user-agent", "").lower()
-            is_mobile = any(device in user_agent for device in ['iphone', 'android', 'mobile'])
-            
-            disposition = "inline" if is_mobile else "attachment"
-            encoded_filename = quote(filename.encode('utf-8'))
-            
-            return FileResponse(
-                path=path,
-                media_type=media_type,
-                headers={
-                    "Content-Disposition": f"{disposition}; filename*=UTF-8''{encoded_filename}",
-                    "Accept-Ranges": "bytes",
-                    "Access-Control-Allow-Origin": "*",
-                }
-            )
-            
-    except Exception as e:
-        print(f"Stream error: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+@app.get("/device-info")
+async def device_info(request: Request):
+    """Get device information"""
+    device_type = get_device_type(request.headers.get("user-agent", ""))
+    device_folder = get_device_folder(request)
     
-
-# Also add a streaming endpoint for better mobile support
-@app.api_route("/stream/{filename:path}", methods=["GET", "HEAD"])
-async def stream_file(filename: str, request: Request):
-    """Stream video for mobile playback with range support"""
-    try:
-        filename = os.path.basename(unquote(filename))
-        path = DOWNLOAD_FOLDER / filename
-
-        if not path.exists():
-            return JSONResponse(status_code=404, content={"error": "File not found"})
-
-        file_size = path.stat().st_size
-        range_header = request.headers.get("range")
-        
-        # Determine media type
-        if filename.endswith('.mp4'):
-            media_type = 'video/mp4'
-        elif filename.endswith('.mp3'):
-            media_type = 'audio/mpeg'
-        else:
-            media_type = 'video/mp4'
-
-        if range_header:
-            # Handle range requests for video streaming
-            byte1, byte2 = 0, None
-            match = re.search(r'bytes=(\d+)-(\d*)', range_header)
-            if match:
-                byte1 = int(match.group(1))
-                if match.group(2):
-                    byte2 = int(match.group(2))
-            
-            if byte2 is None:
-                byte2 = file_size - 1
-            
-            length = byte2 - byte1 + 1
-            
-            with open(path, 'rb') as f:
-                f.seek(byte1)
-                data = f.read(length)
-            
-            response = Response(
-                content=data,
-                status_code=206,
-                media_type=media_type,
-                headers={
-                    "Content-Range": f"bytes {byte1}-{byte2}/{file_size}",
-                    "Accept-Ranges": "bytes",
-                    "Content-Length": str(length),
-                    "Access-Control-Allow-Origin": "*",
-                }
-            )
-            return response
-        else:
-            # Full file request
-            encoded_filename = quote(filename)
-            return FileResponse(
-                path=path,
-                media_type=media_type,
-                headers={
-                    "Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}",
-                    "Accept-Ranges": "bytes",
-                    "Access-Control-Allow-Origin": "*",
-                }
-            )
-            
-    except Exception as e:
-        print(f"Stream error: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+    # Count files in device folder
+    file_count = len([f for f in device_folder.glob("*") if f.is_file()])
     
-
-@app.options("/download-file/{filename:path}")
-async def download_file_options(filename: str):
-    return Response(
-        status_code=200,
+    return JSONResponse(
+        content={
+            "device": device_type,
+            "folder": str(device_folder),
+            "file_count": file_count,
+            "user_agent": request.headers.get("user-agent", "")[:100]
+        },
         headers={
             "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
         }
     )
 
-@app.get("/file-info")
-async def get_file_info():
-    """Get detailed file information including download URLs"""
-    try:
-        files = []
-        for f in DOWNLOAD_FOLDER.glob("*"):
-            if f.is_file() and not any([
-                f.name.endswith(('.jpg', '.jpeg', '.png', '.webp', '.part', '.ytdl')),
-                f.name.startswith('.')
-            ]):
-                from urllib.parse import quote
-                file_info = {
-                    'name': f.name,
-                    'size': f.stat().st_size,
-                    'modified': f.stat().st_mtime,
-                    'download_url': f"/download-file/{quote(f.name)}",
-                    'metadata': file_metadata.get(f.name, {})
-                }
-                files.append(file_info)
-        
-        files.sort(key=lambda x: x['modified'], reverse=True)
-        return files
-        
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)}
-        )
-
+# Keep your existing endpoints (thumbnails, metadata, etc.) but add CORS headers
 @app.get("/thumbnails/{filename}")
 async def get_thumbnail(filename: str):
-    # Security: prevent directory traversal
     filename = os.path.basename(filename)
     path = THUMBNAIL_FOLDER / filename
     
     if path.exists():
-        return FileResponse(path, media_type='image/jpeg')
+        return FileResponse(
+            path, 
+            media_type='image/jpeg',
+            headers={
+                "Access-Control-Allow-Origin": "*",
+            }
+        )
     
     return JSONResponse(
         status_code=404,
-        content={"error": "Thumbnail not found"}
+        content={"error": "Thumbnail not found"},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+        }
     )
 
 @app.get("/file-metadata/{filename}")
-async def get_file_metadata_endpoint(filename: str):
+async def get_file_metadata_endpoint(filename: str, request: Request):
     """Get metadata including thumbnail for a specific file"""
     filename = os.path.basename(filename)
     
     if filename in file_metadata:
-        return file_metadata[filename]
+        return JSONResponse(
+            content=file_metadata[filename],
+            headers={
+                "Access-Control-Allow-Origin": "*",
+            }
+        )
     
-    # Try to find by base name without extension
-    for key in file_metadata:
-        if key.startswith(filename.rsplit('.', 1)[0]):
-            return file_metadata[key]
-    
-    # Return default if no metadata
-    return {
-        'thumbnail': None,
-        'title': filename.replace('_', ' ').replace('-', ' ').rsplit('.', 1)[0],
-        'uploader': 'Unknown',
-        'duration': 'Unknown'
-    }
+    return JSONResponse(
+        content={
+            'thumbnail': None,
+            'title': filename.replace('_', ' ').replace('-', ' ').rsplit('.', 1)[0],
+            'uploader': 'Unknown',
+            'duration': 'Unknown'
+        },
+        headers={
+            "Access-Control-Allow-Origin": "*",
+        }
+    )
 
 @app.get("/health")
 async def health_check():
@@ -957,7 +807,8 @@ if __name__ == "__main__":
     print(f"Starting Video Downloader...")
     print(f"Local access: http://127.0.0.1:{PORT}")
     print(f"Network access: http://{LOCAL_IP}:{PORT} (for mobile)")
-    print(f"Downloads folder: {DOWNLOAD_FOLDER}")
+    print(f"Laptop downloads folder: {LAPTOP_DOWNLOAD_FOLDER}")
+    print(f"Mobile downloads folder: {MOBILE_DOWNLOAD_FOLDER}")
     print(f"Thumbnails folder: {THUMBNAIL_FOLDER}")
     print(f"\nDebug routes: http://127.0.0.1:{PORT}/debug/routes")
     uvicorn.run(app, host="0.0.0.0", port=PORT)

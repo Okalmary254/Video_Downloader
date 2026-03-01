@@ -130,6 +130,27 @@ async function syncOfflineDownloads() {
   }
 }
 
+// ==================== DEVICE DETECTION ====================
+function getDeviceType() {
+  const ua = navigator.userAgent.toLowerCase();
+  if (/iphone|ipad|ipod|android|mobile/i.test(ua)) {
+    return 'mobile';
+  }
+  return 'laptop';
+}
+
+async function getDeviceInfo() {
+  try {
+    const res = await fetch('/device-info');
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (err) {
+    console.error('Failed to get device info:', err);
+  }
+  return { device: getDeviceType(), file_count: 0 };
+}
+
 // ==================== THEME TOGGLE ====================
 const themeToggle = document.createElement('div');
 themeToggle.className = 'theme-toggle';
@@ -178,6 +199,8 @@ if ('serviceWorker' in navigator) {
 let currentJob = null;
 let progressInterval = null;
 let previewData = null;
+let progressRetryCount = 0;
+const MAX_RETRIES = 3;
 
 // ==================== DOM ELEMENTS ====================
 const urlInput = document.getElementById('url');
@@ -269,13 +292,14 @@ async function startDownload() {
     
     const data = await res.json();
     currentJob = data.job_id;
+    progressRetryCount = 0;
     
     showStatus('Download started...', 'info');
     progressBar.style.width = '5%';
     
     // Start polling for progress
     if (progressInterval) clearInterval(progressInterval);
-    progressInterval = setInterval(trackProgress, 1000);
+    progressInterval = setInterval(trackProgress, 1500); // Increased to 1.5 seconds for mobile
     
   } catch (err) {
     console.error(err);
@@ -289,16 +313,28 @@ async function trackProgress() {
   if (!currentJob) return;
   
   try {
-    const res = await fetch(`/progress/${currentJob}`);
+    // Add timeout for mobile networks
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+    
+    const res = await fetch(`/progress/${currentJob}`, {
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeoutId);
+    
     if (!res.ok) throw new Error('Progress fetch failed');
     
     const data = await res.json();
+    
+    // Reset retry count on successful fetch
+    progressRetryCount = 0;
     
     // Update status
     if (data.status === 'downloading') {
       const percent = parseFloat(data.percent) || 0;
       progressBar.style.width = percent + '%';
-      showStatus(`Downloading: ${data.percent}`, 'info');
+      showStatus(`Downloading: ${data.percent}%`, 'info');
       
     } else if (data.status === 'processing') {
       showStatus('Processing video...', 'info');
@@ -338,12 +374,21 @@ async function trackProgress() {
     }
     
   } catch (err) {
-    console.error(err);
-    showStatus('Error tracking progress', 'error');
-    clearInterval(progressInterval);
-    progressInterval = null;
-    downloadBtn.disabled = false;
-    downloadBtn.innerHTML = '<i class="fas fa-cloud-download-alt"></i> Download';
+    console.error('Progress tracking error:', err);
+    
+    // Retry logic for mobile networks
+    if (progressRetryCount < MAX_RETRIES) {
+      progressRetryCount++;
+      console.log(`Retrying progress fetch (${progressRetryCount}/${MAX_RETRIES})...`);
+      // Don't clear interval, let it retry
+    } else {
+      // Max retries reached, show error but don't stop completely
+      showStatus('Connection unstable. Download may still be running...', 'info');
+      progressRetryCount = 0;
+      
+      // Don't clear interval or disable button - let it keep trying
+      // The download might still complete on the server
+    }
   }
 }
 
@@ -362,6 +407,7 @@ async function getFileMetadata(filename) {
 async function loadFiles() {
   try {
     const container = document.getElementById('files');
+    const deviceInfo = await getDeviceInfo();
     
     // Try to get from server first
     let files = [];
@@ -382,11 +428,28 @@ async function loadFiles() {
     }
     
     if (files.length === 0) {
-      container.innerHTML = '<div style="text-align:center; opacity:0.7; padding:16px;"><i class="fas fa-film"></i> No downloads yet</div>';
+      container.innerHTML = `
+        <div class="device-indicator">
+          <i class="fas fa-${deviceInfo.device === 'mobile' ? 'mobile-alt' : 'laptop'}"></i>
+          ${deviceInfo.device.charAt(0).toUpperCase() + deviceInfo.device.slice(1)} Downloads
+        </div>
+        <div style="text-align:center; opacity:0.7; padding:16px;">
+          <i class="fas fa-film"></i> No downloads on this device yet
+        </div>
+      `;
       return;
     }
     
     container.innerHTML = '';
+    
+    // Add device indicator
+    const deviceHeader = document.createElement('div');
+    deviceHeader.className = 'device-indicator';
+    deviceHeader.innerHTML = `
+      <i class="fas fa-${deviceInfo.device === 'mobile' ? 'mobile-alt' : 'laptop'}"></i>
+      ${deviceInfo.device.charAt(0).toUpperCase() + deviceInfo.device.slice(1)} Downloads (${files.length})
+    `;
+    container.appendChild(deviceHeader);
     
     // Load files with their metadata
     for (const filename of files) {
@@ -405,8 +468,7 @@ async function loadFiles() {
           thumbImg.src = 'https://via.placeholder.com/70x70?text=Video';
         };
       } else {
-        // Try to get thumbnail from video file (first frame)
-        thumbImg.src = await getVideoThumbnail(filename);
+        thumbImg.src = 'https://via.placeholder.com/70x70?text=Video';
       }
       
       thumbImg.alt = 'thumb';
@@ -420,50 +482,30 @@ async function loadFiles() {
       const ext = filename.split('.').pop() || 'mp4';
       const displayTitle = metadata.title || nameWithoutExt;
       
-      // Get file size
-      let fileSize = 'Size unknown';
-      try {
-        const statRes = await fetch(`/download-file/${encodeURIComponent(filename)}`, { method: 'HEAD' });
-        const size = statRes.headers.get('content-length');
-        if (size) {
-          const sizeNum = parseInt(size);
-          if (sizeNum > 1024 * 1024 * 1024) {
-            fileSize = `${(sizeNum / (1024*1024*1024)).toFixed(1)} GB`;
-          } else if (sizeNum > 1024 * 1024) {
-            fileSize = `${(sizeNum / (1024*1024)).toFixed(1)} MB`;
-          } else {
-            fileSize = `${(sizeNum / 1024).toFixed(1)} KB`;
-          }
-        }
-      } catch (err) {
-        console.error('Failed to get file size:', err);
-      }
-      
       infoSpan.innerHTML = `
         <div class="filename"><i class="fas fa-video"></i> ${displayTitle.substring(0, 25)}${displayTitle.length > 25 ? '…' : ''}</div>
-        <div class="filesize"><i class="fas fa-file-${ext === 'mp3' ? 'audio' : 'video'}"></i> .${ext} • ${fileSize}</div>
+        <div class="filesize"><i class="fas fa-file-${ext === 'mp3' ? 'audio' : 'video'}"></i> .${ext}</div>
       `;
       
       div.appendChild(infoSpan);
       
-      // In your loadFiles function, modify the download button to check device
+      // Download button with device-specific handling
       const btn = document.createElement('button');
       btn.innerHTML = '<i class="fas fa-download"></i> Save';
-
-      // Check if mobile for better playback
-      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+      
+      const isMobile = deviceInfo.device === 'mobile';
 
       btn.onclick = (e) => {
         e.stopPropagation();
-        const filename = encodeURIComponent(metadata.filename || filename);
-    
-      if (isMobile && (filename.endsWith('.mp4') || filename.endsWith('.webm'))) {
-          // On mobile, open in new tab for better playback
-          window.open(`/stream/${filename}`, '_blank');
-      } else {
+        const encodedFilename = encodeURIComponent(filename);
+        
+        if (isMobile && (filename.endsWith('.mp4') || filename.endsWith('.webm'))) {
+          // On mobile, use stream endpoint for better playback
+          window.open(`/stream/${encodedFilename}`, '_blank');
+        } else {
           // On desktop, download normally
-          window.open(`/download-file/${filename}`, '_blank');
-      }
+          window.open(`/download-file/${encodedFilename}`, '_blank');
+        }
       };
       
       div.appendChild(btn);
@@ -471,47 +513,8 @@ async function loadFiles() {
     }
     
   } catch (err) {
-    console.error(err);
+    console.error('Error loading files:', err);
   }
-}
-
-// Function to extract thumbnail from video file using canvas
-async function getVideoThumbnail(filename) {
-  return new Promise((resolve) => {
-    const video = document.createElement('video');
-    video.preload = 'metadata';
-    video.crossOrigin = 'anonymous';
-    
-    video.onloadeddata = () => {
-      video.currentTime = 0.1;
-    };
-    
-    video.onseeked = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth || 160;
-      canvas.height = video.videoHeight || 90;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      
-      const thumbnailUrl = canvas.toDataURL('image/jpeg', 0.7);
-      video.remove();
-      resolve(thumbnailUrl);
-    };
-    
-    video.onerror = () => {
-      resolve('https://via.placeholder.com/70x70?text=Video');
-    };
-    
-    video.src = `/download-file/${encodeURIComponent(filename)}`;
-    video.load();
-    
-    setTimeout(() => {
-      if (!video.ended && !video.paused) {
-        video.pause();
-        resolve('https://via.placeholder.com/70x70?text=Video');
-      }
-    }, 3000);
-  });
 }
 
 // ==================== HELPER FUNCTIONS ====================
@@ -527,7 +530,9 @@ function showStatus(message, type = 'info') {
 }
 
 function formatDuration(seconds) {
-  if (!seconds) return 'Unknown duration';
+  if (!seconds || seconds === 'Unknown') return 'Unknown duration';
+  if (typeof seconds === 'string') return seconds;
+  
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = seconds % 60;
