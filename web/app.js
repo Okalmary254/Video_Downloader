@@ -50,8 +50,7 @@ function updateOnlineStatus() {
     offlineIndicator.style.display = 'none';
     showStatus('Back online!', 'success');
     syncOfflineDownloads();
-    // Refresh files when back online
-    loadFiles();
+    loadFiles(); // Refresh files when back online
   } else {
     offlineIndicator.style.display = 'flex';
     showStatus('You are offline. Downloads will be queued.', 'info');
@@ -63,7 +62,6 @@ async function queueOfflineDownload(url, quality) {
   if ('serviceWorker' in navigator && 'SyncManager' in window) {
     const registration = await navigator.serviceWorker.ready;
     
-    // Store download in IndexedDB
     const db = await openDB();
     const tx = db.transaction('pendingDownloads', 'readwrite');
     const store = tx.objectStore('pendingDownloads');
@@ -75,7 +73,6 @@ async function queueOfflineDownload(url, quality) {
       timestamp: new Date().toISOString()
     });
     
-    // Register sync
     await registration.sync.register('sync-downloads');
     showStatus('Download queued for when you\'re back online', 'info');
   }
@@ -143,22 +140,14 @@ function getDeviceType() {
 
 async function getDeviceInfo() {
   try {
-    const res = await fetch('/device-info', {
-      cache: 'no-store',
-      headers: {
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache'
-      }
-    });
+    const res = await fetch('/device-info');
     if (res.ok) {
-      const info = await res.json();
-      console.log(' Device Info:', info);
-      return info;
+      return await res.json();
     }
   } catch (err) {
     console.error('Failed to get device info:', err);
   }
-  return { device: getDeviceType(), file_count: 0 };
+  return { device: getDeviceType(), file_count: 0, files: [] };
 }
 
 // ==================== THEME TOGGLE ====================
@@ -167,14 +156,12 @@ themeToggle.className = 'theme-toggle';
 themeToggle.innerHTML = '<i class="fas fa-moon"></i>';
 document.body.appendChild(themeToggle);
 
-// Check for saved theme preference
 const savedTheme = localStorage.getItem('theme') || 'light';
 if (savedTheme === 'dark') {
   document.documentElement.setAttribute('data-theme', 'dark');
   themeToggle.innerHTML = '<i class="fas fa-sun"></i>';
 }
 
-// Theme toggle functionality
 themeToggle.addEventListener('click', () => {
   const currentTheme = document.documentElement.getAttribute('data-theme');
   if (currentTheme === 'dark') {
@@ -193,10 +180,7 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js')
     .then(reg => {
       console.log('Service Worker registered:', reg);
-      
-      // Check for updates
       reg.addEventListener('updatefound', () => {
-        const newWorker = reg.installing;
         showStatus('New version available! Refresh to update.', 'info');
       });
     })
@@ -211,8 +195,7 @@ let progressInterval = null;
 let previewData = null;
 let progressRetryCount = 0;
 const MAX_RETRIES = 5;
-const PROGRESS_INTERVAL = 2000; // 2 seconds for mobile
-let lastFileListHash = null; // Track if file list changed
+const PROGRESS_INTERVAL = 2000;
 
 // ==================== DOM ELEMENTS ====================
 const urlInput = document.getElementById('url');
@@ -248,7 +231,6 @@ async function preview() {
     
     previewData = await res.json();
     
-    // Update preview card
     previewTitle.textContent = previewData.title || 'Unknown title';
     previewMeta.innerHTML = `
       <i class="far fa-clock"></i> ${formatDuration(previewData.duration)} • 
@@ -280,13 +262,11 @@ async function startDownload() {
     return;
   }
 
-  // Check if offline
   if (!navigator.onLine) {
     await queueOfflineDownload(url, quality);
     return;
   }
 
-  // Disable button during download
   downloadBtn.disabled = true;
   downloadBtn.innerHTML = '<i class="fas fa-spinner fa-pulse"></i> Starting...';
   
@@ -306,12 +286,9 @@ async function startDownload() {
     currentJob = data.job_id;
     progressRetryCount = 0;
     
-    console.log(` Download started - Job ID: ${data.job_id}, Device: ${data.device}`);
-    
     showStatus(`Download started on ${data.device}...`, 'info');
     progressBar.style.width = '5%';
     
-    // Start polling for progress
     if (progressInterval) clearInterval(progressInterval);
     progressInterval = setInterval(trackProgress, PROGRESS_INTERVAL);
     
@@ -327,16 +304,14 @@ async function trackProgress() {
   if (!currentJob) return;
   
   try {
-    // Add timeout for mobile networks
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout for mobile
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
     
     const res = await fetch(`/progress/${currentJob}`, {
       signal: controller.signal,
       cache: 'no-store',
       headers: {
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache'
+        'Cache-Control': 'no-cache'
       }
     });
     
@@ -345,14 +320,8 @@ async function trackProgress() {
     if (!res.ok) throw new Error('Progress fetch failed');
     
     const data = await res.json();
-    
-    // Log progress for debugging
-    console.log(` Progress: ${data.status} - ${data.percent}% (Device: ${data.device})`);
-    
-    // Reset retry count on successful fetch
     progressRetryCount = 0;
     
-    // Update status
     if (data.status === 'downloading') {
       const percent = parseFloat(data.percent) || 0;
       progressBar.style.width = percent + '%';
@@ -366,42 +335,23 @@ async function trackProgress() {
       progressBar.style.width = '100%';
       showStatus('Download complete!', 'success');
       
-      console.log(` Download finished: ${data.filename} on ${data.device}`);
-      
-      // Show notification if supported
       if ('Notification' in window && Notification.permission === 'granted') {
         new Notification('Download Complete', {
-          body: `${data.title || 'Your video'} has been downloaded!`,
+          body: 'Your video has been downloaded successfully!',
           icon: '/icons/icon-192x192.png'
         });
       }
       
-      // Stop polling
       clearInterval(progressInterval);
       progressInterval = null;
       currentJob = null;
       
-      // Re-enable button
       downloadBtn.disabled = false;
       downloadBtn.innerHTML = '<i class="fas fa-cloud-download-alt"></i> Download';
       
-      // IMPORTANT: Force refresh file list multiple times to ensure mobile sees new files
-      console.log(' Refreshing file list...');
-      await loadFiles(true); // Force refresh immediately
+      // Force immediate file refresh
+      await loadFiles();
       
-      // Refresh again after 2 seconds (in case file is still being written)
-      setTimeout(() => {
-        console.log(' Second refresh...');
-        loadFiles(true);
-      }, 2000);
-      
-      // And one more time after 5 seconds
-      setTimeout(() => {
-        console.log(' Final refresh...');
-        loadFiles(true);
-      }, 5000);
-      
-      // Reset progress after 3 seconds
       setTimeout(() => {
         progressBar.style.width = '0%';
       }, 3000);
@@ -416,25 +366,18 @@ async function trackProgress() {
   } catch (err) {
     console.error('Progress tracking error:', err);
     
-    // Don't give up immediately on mobile
     if (err.name === 'AbortError') {
-      console.log('Progress request timeout on mobile');
-      // Just retry silently
+      console.log('Progress request timeout');
       return;
     }
     
-    // Retry logic for mobile networks
     if (progressRetryCount < MAX_RETRIES) {
       progressRetryCount++;
       console.log(`Retrying progress fetch (${progressRetryCount}/${MAX_RETRIES})...`);
-      // Don't show error, just retry
     } else {
-      // Max retries reached, but don't completely fail
       showStatus('Download in progress... Check back soon', 'info');
       progressRetryCount = 0;
-      
-      // Refresh files anyway in case download completed
-      setTimeout(() => loadFiles(true), 5000);
+      setTimeout(() => loadFiles(), 5000);
     }
   }
 }
@@ -442,11 +385,7 @@ async function trackProgress() {
 async function getFileMetadata(filename) {
   try {
     const res = await fetch(`/file-metadata/${encodeURIComponent(filename)}`, {
-      cache: 'no-store',
-      headers: {
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache'
-      }
+      cache: 'no-store'
     });
     if (res.ok) {
       return await res.json();
@@ -457,90 +396,74 @@ async function getFileMetadata(filename) {
   return { thumbnail: null, title: filename };
 }
 
-async function loadFiles(forceRefresh = false) {
+async function loadFiles() {
   try {
     const container = document.getElementById('files');
     const deviceInfo = await getDeviceInfo();
+    const deviceType = getDeviceType();
     
-    console.log(` Loading files for ${deviceInfo.device}...`);
-    
-    // Try to get from server first with aggressive cache busting
     let files = [];
     try {
-      const timestamp = new Date().getTime();
-      const res = await fetch(`/files?t=${timestamp}`, {
+      const res = await fetch('/files', {
         cache: 'no-store',
         headers: {
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          'Pragma': 'no-cache',
-          'Expires': '0'
+          'Cache-Control': 'no-cache'
         }
       });
       
       if (res.ok) {
         files = await res.json();
-        console.log(` Received ${files.length} files from server:`, files);
-        
-        // Check if file list actually changed
-        const newHash = JSON.stringify(files.sort());
-        if (!forceRefresh && newHash === lastFileListHash) {
-          console.log(' File list unchanged, skipping update');
-          return;
-        }
-        lastFileListHash = newHash;
+        console.log(`Loaded ${files.length} files for ${deviceType}`);
         
         // Save to IndexedDB for offline access
         for (const file of files) {
           await saveDownloadedFile(file, { synced: true });
         }
-      } else {
-        console.warn('Failed to fetch files from server:', res.status);
       }
     } catch (err) {
-      console.log(' Offline or error - loading from cache:', err.message);
-      // If offline, load from IndexedDB
+      console.log('Offline - loading from cache');
       const cached = await getDownloadedFiles();
       files = cached.map(f => f.filename);
     }
     
     if (files.length === 0) {
       container.innerHTML = `
-        <div class="device-indicator">
-          <i class="fas fa-${deviceInfo.device === 'mobile' ? 'mobile-alt' : 'laptop'}"></i>
-          ${deviceInfo.device.charAt(0).toUpperCase() + deviceInfo.device.slice(1)} Downloads
+        <div class="device-indicator" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+          <i class="fas fa-${deviceType === 'mobile' ? 'mobile-alt' : 'laptop'}"></i>
+          ${deviceType.charAt(0).toUpperCase() + deviceType.slice(1)} Downloads
         </div>
-        <div style="text-align:center; opacity:0.7; padding:16px;">
-          <i class="fas fa-film"></i> No downloads on this device yet
+        <div style="text-align:center; opacity:0.7; padding:30px 16px; background: rgba(255,255,255,0.05); border-radius: 20px; margin-top: 15px;">
+          <i class="fas fa-film" style="font-size: 48px; margin-bottom: 15px; opacity: 0.5;"></i>
+          <p>No downloads on this device yet</p>
+          <p style="font-size: 12px; margin-top: 10px;">Downloads are saved separately for laptop and mobile</p>
         </div>
       `;
-      console.log(' No files found for this device');
       return;
     }
     
-    console.log(` Displaying ${files.length} files`);
-    
     container.innerHTML = '';
     
-    // Add device indicator with count
+    // Device header
     const deviceHeader = document.createElement('div');
     deviceHeader.className = 'device-indicator';
+    deviceHeader.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+    deviceHeader.style.color = 'white';
     deviceHeader.innerHTML = `
-      <i class="fas fa-${deviceInfo.device === 'mobile' ? 'mobile-alt' : 'laptop'}"></i>
-      ${deviceInfo.device.charAt(0).toUpperCase() + deviceInfo.device.slice(1)} Downloads (${files.length})
+      <i class="fas fa-${deviceType === 'mobile' ? 'mobile-alt' : 'laptop'}"></i>
+      ${deviceType.charAt(0).toUpperCase() + deviceType.slice(1)} Downloads (${files.length})
     `;
     container.appendChild(deviceHeader);
     
-    // Load files with their metadata
+    // Load files with metadata
     for (const filename of files) {
       const metadata = await getFileMetadata(filename);
       
       const div = document.createElement('div');
       div.className = 'history-item';
       
-      // Thumbnail image
       const thumbImg = document.createElement('img');
       thumbImg.className = 'thumb-img';
-      thumbImg.loading = 'lazy'; // Lazy load images
+      thumbImg.loading = 'lazy';
       
       if (metadata.thumbnail) {
         thumbImg.src = metadata.thumbnail;
@@ -557,7 +480,6 @@ async function loadFiles(forceRefresh = false) {
       const infoSpan = document.createElement('span');
       infoSpan.className = 'history-info';
       
-      // Extract basic info from filename or use metadata
       const nameWithoutExt = filename.replace(/\.[^/.]+$/, "");
       const ext = filename.split('.').pop() || 'mp4';
       const displayTitle = metadata.title || nameWithoutExt;
@@ -569,23 +491,16 @@ async function loadFiles(forceRefresh = false) {
       
       div.appendChild(infoSpan);
       
-      // Download button with device-specific handling
       const btn = document.createElement('button');
       btn.innerHTML = '<i class="fas fa-download"></i> Save';
-      
-      const isMobile = deviceInfo.device === 'mobile';
 
       btn.onclick = (e) => {
         e.stopPropagation();
         const encodedFilename = encodeURIComponent(filename);
         
-        console.log(` Download clicked: ${filename} (${isMobile ? 'mobile' : 'desktop'})`);
-        
-        if (isMobile && (filename.endsWith('.mp4') || filename.endsWith('.webm'))) {
-          // On mobile, use stream endpoint for better playback
+        if (deviceType === 'mobile' && (filename.endsWith('.mp4') || filename.endsWith('.webm'))) {
           window.open(`/stream/${encodedFilename}`, '_blank');
         } else {
-          // On desktop, download normally
           window.open(`/download-file/${encodedFilename}`, '_blank');
         }
       };
@@ -595,7 +510,7 @@ async function loadFiles(forceRefresh = false) {
     }
     
   } catch (err) {
-    console.error(' Error loading files:', err);
+    console.error('Error loading files:', err);
   }
 }
 
@@ -628,7 +543,7 @@ if ('Notification' in window && Notification.permission === 'default') {
 
 // ==================== EVENT LISTENERS ====================
 
-// Platform icon clicks - fill with example URLs
+// Platform icon clicks
 document.querySelectorAll('.platform-item').forEach(item => {
   item.addEventListener('click', () => {
     const examples = {
@@ -648,12 +563,10 @@ document.querySelectorAll('.platform-item').forEach(item => {
   });
 });
 
-// URL input - auto preview on paste
 urlInput.addEventListener('paste', () => {
   setTimeout(preview, 100);
 });
 
-// Also preview on blur (when user leaves input)
 urlInput.addEventListener('blur', preview);
 
 // Hide splash
@@ -663,22 +576,15 @@ window.addEventListener('load', () => {
     document.querySelector('.app').style.display = 'block';
   }, 2000);
   
-  // Check online status
   updateOnlineStatus();
 });
 
 // Initialize
-console.log(' App initializing...');
-loadFiles(true); // Force initial load
-
-// Auto-preview on page load (if URL exists)
+loadFiles();
 setTimeout(preview, 500);
 
-// Refresh file list more frequently for mobile to catch new downloads
-const isMobileDevice = getDeviceType() === 'mobile';
-const refreshInterval = isMobileDevice ? 10000 : 15000; // 10s for mobile, 15s for desktop
-console.log(` File refresh interval: ${refreshInterval}ms (${isMobileDevice ? 'mobile' : 'desktop'})`);
-setInterval(() => loadFiles(false), refreshInterval);
+// Refresh file list every 15 seconds
+setInterval(loadFiles, 15000);
 
 // ==================== EXPOSE PUBLIC API ====================
 window.app = {
