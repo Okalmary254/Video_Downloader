@@ -64,10 +64,45 @@ print(f"   Local: http://127.0.0.1:8000")
 print(f"   Network: http://{LOCAL_IP}:8000 (for mobile devices)\n")
 
 def get_device_type(user_agent: str):
-    """Simple user agent check to determine device type"""
+    """Improved user agent check to determine device type"""
     user_agent = user_agent.lower()
-    if any(mobile in user_agent for mobile in ["iphone", "android", "ipad", "mobile"]):
+    
+    # More comprehensive mobile detection
+    mobile_keywords = [
+        'iphone', 'ipad', 'ipod', 'android', 'mobile', 'phone', 
+        'blackberry', 'opera mini', 'opera mobi', 'nokia', 'symbian',
+        'windows phone', 'palm', 'kindle', 'silk', 'playbook',
+        'bb10', 'rim tablet', 'meego', 'smartphone'
+    ]
+    
+    # Check for mobile
+    for keyword in mobile_keywords:
+        if keyword in user_agent:
+            print(f"Mobile detected via keyword: {keyword}")
+            return "mobile"
+    
+    # Check for tablet (also mobile)
+    tablet_keywords = ['tablet', 'ipad', 'kindle', 'playbook']
+    for keyword in tablet_keywords:
+        if keyword in user_agent:
+            print(f"Tablet detected via keyword: {keyword}")
+            return "mobile"
+    
+    # Check for Android without mobile (could be tablet)
+    if 'android' in user_agent and 'mobile' not in user_agent:
+        # This might be an Android tablet
+        print(f"Android tablet detected")
         return "mobile"
+    
+    # Check for common desktop indicators
+    desktop_keywords = ['windows nt', 'macintosh', 'linux x86', 'x11']
+    for keyword in desktop_keywords:
+        if keyword in user_agent:
+            print(f"Desktop detected via keyword: {keyword}")
+            return "laptop"
+    
+    # Default to laptop if no mobile indicators
+    print(f"Defaulting to laptop for user agent: {user_agent[:100]}")
     return "laptop"
 
 
@@ -75,9 +110,27 @@ def get_device_folder(request: Request) -> Path:
     """Determine download folder based on device type"""
     user_agent = request.headers.get("user-agent", "")
     device_type = get_device_type(user_agent)
+    print(f"Device detection - User-Agent: {user_agent[:100]}...")
+    print(f"Device type determined: {device_type}")
+    
     if device_type == "mobile":
         return MOBILE_DOWNLOAD_FOLDER
     return LAPTOP_DOWNLOAD_FOLDER
+
+# Debug endpoint to see device detection
+@app.get("/debug/device")
+async def debug_device(request: Request):
+    """Debug endpoint to check device detection"""
+    user_agent = request.headers.get("user-agent", "")
+    device_type = get_device_type(user_agent)
+    
+    return {
+        "user_agent": user_agent[:200],
+        "device_type": device_type,
+        "laptop_folder": str(LAPTOP_DOWNLOAD_FOLDER),
+        "mobile_folder": str(MOBILE_DOWNLOAD_FOLDER),
+        "detection_method": "keyword based"
+    }
 
 # Debug endpoint to see all registered routes
 @app.get("/debug/routes")
@@ -132,6 +185,7 @@ async def home():
             {"".join(f'<li>{f}</li>' for f in os.listdir('.') if f.endswith('.html'))}
         </ul>
         <p><a href="/debug/routes">View debug routes</a></p>
+        <p><a href="/debug/device">Check device detection</a></p>
     </body>
     </html>
     """
@@ -990,4 +1044,5 @@ if __name__ == "__main__":
     print(f"Mobile downloads folder: {MOBILE_DOWNLOAD_FOLDER}")
     print(f"Thumbnails folder: {THUMBNAIL_FOLDER}")
     print(f"\nDebug routes: http://127.0.0.1:{PORT}/debug/routes")
+    print(f"Debug device detection: http://127.0.0.1:{PORT}/debug/device")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
