@@ -337,6 +337,11 @@ async def download_file(filename: str):
     try:
         # Prevent directory traversal
         filename = os.path.basename(filename)
+        
+        # URL decode the filename first (if it was encoded)
+        from urllib.parse import unquote
+        filename = unquote(filename)
+        
         path = DOWNLOAD_FOLDER / filename
 
         print(f"Download requested: {filename}")
@@ -345,7 +350,8 @@ async def download_file(filename: str):
 
         if not path.exists():
             # Try to find the file with different extensions
-            files = list(DOWNLOAD_FOLDER.glob(f"{Path(filename).stem}.*"))
+            stem = Path(filename).stem
+            files = list(DOWNLOAD_FOLDER.glob(f"{stem}.*"))
             if files:
                 path = files[0]
                 filename = path.name
@@ -367,19 +373,24 @@ async def download_file(filename: str):
                 media_type = 'video/mp4'
             elif filename.endswith('.mp3'):
                 media_type = 'audio/mpeg'
+            elif filename.endswith('.webm'):
+                media_type = 'video/webm'
             else:
                 media_type = 'application/octet-stream'
 
-        # Encode filename for different devices
-        encoded_filename = quote(filename)
+        # For the Content-Disposition header, we need to handle special characters
+        # Use a simple ASCII fallback for the filename in the header
+        ascii_filename = ''.join(c for c in filename if ord(c) < 128)
+        if not ascii_filename:  # If no ASCII chars, use a default
+            ascii_filename = "video.mp4"
         
         # Create response with proper headers
         response = FileResponse(
             path=path,
             media_type=media_type,
-            filename=filename,
+            filename=ascii_filename,  # Use ASCII version for the response
             headers={
-                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
+                "Content-Disposition": f"attachment; filename=\"{ascii_filename}\"",
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
                 "Access-Control-Allow-Headers": "*",
@@ -411,8 +422,17 @@ async def download_file_options(filename: str):
             "Access-Control-Allow-Headers": "*",
         }
     )
-
-# [Rest of your endpoints remain the same]
+# Add OPTIONS method for CORS preflight
+@app.options("/download-file/{filename:path}")
+async def download_file_options(filename: str):
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+    )
 
 @app.get("/files")
 async def list_files():
