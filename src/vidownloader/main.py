@@ -59,7 +59,7 @@ def get_local_ip():
         return "127.0.0.1"
 
 LOCAL_IP = get_local_ip()
-print(f"\n🌐 Server is accessible at:")
+print(f"\n Server is accessible at:")
 print(f"   Local: http://127.0.0.1:8000")
 print(f"   Network: http://{LOCAL_IP}:8000 (for mobile devices)\n")
 
@@ -241,12 +241,14 @@ def download_task(job_id, url, format_option, device_folder):
                     "status": "downloading",
                     "percent": percent,
                     "speed": d.get('_speed_str', 'N/A').strip(),
-                    "eta": d.get('_eta_str', 'N/A').strip()
+                    "eta": d.get('_eta_str', 'N/A').strip(),
+                    "device": device_folder.name
                 }
             elif d['status'] == 'finished':
                 if job_id in progress_store:
                     progress_store[job_id]["status"] = "processing"
                     progress_store[job_id]["filename"] = os.path.basename(d.get('filename', ''))
+                    progress_store[job_id]["device"] = device_folder.name
 
     # Format mapping for yt-dlp
     format_map = {
@@ -307,29 +309,46 @@ def download_task(job_id, url, format_option, device_folder):
             with progress_lock:
                 if job_id in progress_store:
                     progress_store[job_id]["title"] = info.get('title', 'Unknown')
+                    progress_store[job_id]["device"] = device_folder.name
                 else:
                     progress_store[job_id] = {
                         "status": "starting",
                         "percent": "0",
-                        "title": info.get('title', 'Unknown')
+                        "title": info.get('title', 'Unknown'),
+                        "device": device_folder.name
                     }
+            
+            print(f"Starting download to {device_folder.name}: {info.get('title', 'Unknown')}")
             
             # Download the video
             ydl.download([url])
             
             # Wait a moment for file to be fully written
-            time.sleep(2)
+            time.sleep(3)
             
             # Verify file exists in device folder
             actual_path = device_folder / video_basename
             if not actual_path.exists():
-                # Try to find the actual file in device folder
-                files = list(device_folder.glob("*.mp4")) + list(device_folder.glob("*.mp3"))
+                # Try to find the actual file in device folder with more file types
+                if format_option == "audio":
+                    files = list(device_folder.glob("*.mp3")) + list(device_folder.glob("*.m4a")) + list(device_folder.glob("*.opus"))
+                else:
+                    files = list(device_folder.glob("*.mp4")) + list(device_folder.glob("*.webm")) + list(device_folder.glob("*.mkv"))
+                
+                # Filter out partial/temp files
+                files = [f for f in files if not any(ext in f.name for ext in ['.part', '.ytdl', '.temp'])]
+                
                 if files:
                     # Get the most recently modified file
                     files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
                     video_basename = files[0].name
+                    actual_path = files[0]
                     print(f"Found actual file: {video_basename} in {device_folder.name}")
+                else:
+                    raise Exception(f"Downloaded file not found in {device_folder.name}. Checked formats: mp4, mp3, webm, mkv, m4a, opus")
+            
+            file_size = actual_path.stat().st_size
+            print(f"✓ Verified file exists: {actual_path} (size: {file_size:,} bytes)")
             
             # Download and save thumbnail
             if info.get('thumbnail'):
@@ -370,12 +389,13 @@ def download_task(job_id, url, format_option, device_folder):
                             'duration': info.get('duration', 0),
                             'filename': video_basename,
                             'device': device_folder.name,
-                            'download_path': str(device_folder / video_basename)
+                            'download_path': str(device_folder / video_basename),
+                            'file_size': file_size
                         }
                         
-                        print(f"Thumbnail saved for: {video_basename} ({device_folder.name})")
+                        print(f"✓ Thumbnail saved for: {video_basename} ({device_folder.name})")
                 except Exception as e:
-                    print(f"Thumbnail download failed: {e}")
+                    print(f"⚠ Thumbnail download failed: {e}")
             
             # Mark as finished - KEEP THE PROGRESS STORE UPDATED
             with progress_lock:
@@ -387,15 +407,18 @@ def download_task(job_id, url, format_option, device_folder):
                     "percent": "100"
                 }
             
-            print(f"Download completed: {video_basename} on {device_folder.name}")
+            print(f"✓ Download completed: {video_basename} on {device_folder.name}")
+            print(f"  File location: {actual_path}")
+            print(f"  File size: {file_size:,} bytes")
             
     except Exception as e:
         with progress_lock:
             progress_store[job_id] = {
                 "status": "error",
-                "error": str(e)
+                "error": str(e),
+                "device": device_folder.name
             }
-        print(f"Download error: {e}")
+        print(f"✗ Download error: {e}")
         import traceback
         traceback.print_exc()
 
@@ -559,6 +582,13 @@ async def start_download(background_tasks: BackgroundTasks,
     device_folder = get_device_folder(request)
     device_type = get_device_type(request.headers.get("user-agent", ""))
 
+    print(f"\n Starting download:")
+    print(f"  Device: {device_type}")
+    print(f"  Folder: {device_folder}")
+    print(f"  Job ID: {job_id}")
+    print(f"  URL: {url}")
+    print(f"  Quality: {quality}")
+
     with progress_lock:
         progress_store[job_id] = {
             "status": "starting",
@@ -614,19 +644,36 @@ async def list_files(request: Request):
         device_folder = get_device_folder(request)
         device_type = get_device_type(request.headers.get("user-agent", ""))
         
+        print(f"\n Listing files for {device_type}:")
+        print(f"  Folder: {device_folder}")
+        print(f"  Folder exists: {device_folder.exists()}")
+        
+        if not device_folder.exists():
+            print(f"  ⚠ Folder does not exist!")
+            return JSONResponse(
+                content=[],
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "GET, OPTIONS",
+                    "Access-Control-Allow-Headers": "*",
+                    "Cache-Control": "no-cache",
+                }
+            )
+        
         files = []
-        for f in device_folder.glob("*"):
+        for f in device_folder.iterdir():
             if f.is_file() and not any([
-                f.name.endswith(('.jpg', '.jpeg', '.png', '.webp', '.part', '.ytdl')),
+                f.name.endswith(('.jpg', '.jpeg', '.png', '.webp', '.part', '.ytdl', '.temp')),
                 f.name.startswith('.')
             ]):
                 files.append(f.name)
+                print(f"  - {f.name} ({f.stat().st_size:,} bytes)")
         
         # Sort by modification time (newest first)
         files_with_time = [(f, (device_folder / f).stat().st_mtime) for f in files]
         files_with_time.sort(key=lambda x: x[1], reverse=True)
         
-        print(f"Serving {device_type} files: {len(files_with_time)} files")
+        print(f"  Total files: {len(files_with_time)}")
         
         return JSONResponse(
             content=[f[0] for f in files_with_time],
@@ -639,7 +686,9 @@ async def list_files(request: Request):
         )
         
     except Exception as e:
-        print(f"Error listing files: {e}")
+        print(f"✗ Error listing files: {e}")
+        import traceback
+        traceback.print_exc()
         return JSONResponse(
             status_code=500,
             content={"error": str(e)},
@@ -837,11 +886,15 @@ async def device_info(request: Request):
     # Count files in device folder
     file_count = len([f for f in device_folder.glob("*") if f.is_file() and not f.name.endswith(('.jpg', '.jpeg', '.png', '.webp'))])
     
+    # List actual files
+    files_list = [f.name for f in device_folder.glob("*") if f.is_file() and not f.name.endswith(('.jpg', '.jpeg', '.png', '.webp', '.part', '.ytdl'))]
+    
     return JSONResponse(
         content={
             "device": device_type,
             "folder": str(device_folder),
             "file_count": file_count,
+            "files": files_list[:10],  # First 10 files for debugging
             "user_agent": request.headers.get("user-agent", "")[:100]
         },
         headers={
@@ -913,6 +966,8 @@ async def health_check():
     return {
         "status": "healthy",
         "downloads_folder": DOWNLOAD_FOLDER.exists(),
+        "laptop_folder": LAPTOP_DOWNLOAD_FOLDER.exists(),
+        "mobile_folder": MOBILE_DOWNLOAD_FOLDER.exists(),
         "thumbnails_folder": THUMBNAIL_FOLDER.exists(),
         "ffmpeg_available": check_ffmpeg()
     }

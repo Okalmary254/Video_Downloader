@@ -143,9 +143,17 @@ function getDeviceType() {
 
 async function getDeviceInfo() {
   try {
-    const res = await fetch('/device-info');
+    const res = await fetch('/device-info', {
+      cache: 'no-store',
+      headers: {
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
+      }
+    });
     if (res.ok) {
-      return await res.json();
+      const info = await res.json();
+      console.log(' Device Info:', info);
+      return info;
     }
   } catch (err) {
     console.error('Failed to get device info:', err);
@@ -204,6 +212,7 @@ let previewData = null;
 let progressRetryCount = 0;
 const MAX_RETRIES = 5;
 const PROGRESS_INTERVAL = 2000; // 2 seconds for mobile
+let lastFileListHash = null; // Track if file list changed
 
 // ==================== DOM ELEMENTS ====================
 const urlInput = document.getElementById('url');
@@ -297,7 +306,9 @@ async function startDownload() {
     currentJob = data.job_id;
     progressRetryCount = 0;
     
-    showStatus('Download started...', 'info');
+    console.log(` Download started - Job ID: ${data.job_id}, Device: ${data.device}`);
+    
+    showStatus(`Download started on ${data.device}...`, 'info');
     progressBar.style.width = '5%';
     
     // Start polling for progress
@@ -324,7 +335,8 @@ async function trackProgress() {
       signal: controller.signal,
       cache: 'no-store',
       headers: {
-        'Cache-Control': 'no-cache'
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
       }
     });
     
@@ -333,6 +345,9 @@ async function trackProgress() {
     if (!res.ok) throw new Error('Progress fetch failed');
     
     const data = await res.json();
+    
+    // Log progress for debugging
+    console.log(` Progress: ${data.status} - ${data.percent}% (Device: ${data.device})`);
     
     // Reset retry count on successful fetch
     progressRetryCount = 0;
@@ -351,10 +366,12 @@ async function trackProgress() {
       progressBar.style.width = '100%';
       showStatus('Download complete!', 'success');
       
+      console.log(` Download finished: ${data.filename} on ${data.device}`);
+      
       // Show notification if supported
       if ('Notification' in window && Notification.permission === 'granted') {
         new Notification('Download Complete', {
-          body: 'Your video has been downloaded successfully!',
+          body: `${data.title || 'Your video'} has been downloaded!`,
           icon: '/icons/icon-192x192.png'
         });
       }
@@ -368,8 +385,21 @@ async function trackProgress() {
       downloadBtn.disabled = false;
       downloadBtn.innerHTML = '<i class="fas fa-cloud-download-alt"></i> Download';
       
-      // Refresh file list immediately
-      await loadFiles();
+      // IMPORTANT: Force refresh file list multiple times to ensure mobile sees new files
+      console.log(' Refreshing file list...');
+      await loadFiles(true); // Force refresh immediately
+      
+      // Refresh again after 2 seconds (in case file is still being written)
+      setTimeout(() => {
+        console.log(' Second refresh...');
+        loadFiles(true);
+      }, 2000);
+      
+      // And one more time after 5 seconds
+      setTimeout(() => {
+        console.log(' Final refresh...');
+        loadFiles(true);
+      }, 5000);
       
       // Reset progress after 3 seconds
       setTimeout(() => {
@@ -404,7 +434,7 @@ async function trackProgress() {
       progressRetryCount = 0;
       
       // Refresh files anyway in case download completed
-      setTimeout(() => loadFiles(), 5000);
+      setTimeout(() => loadFiles(true), 5000);
     }
   }
 }
@@ -412,7 +442,11 @@ async function trackProgress() {
 async function getFileMetadata(filename) {
   try {
     const res = await fetch(`/file-metadata/${encodeURIComponent(filename)}`, {
-      cache: 'no-store'
+      cache: 'no-store',
+      headers: {
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
+      }
     });
     if (res.ok) {
       return await res.json();
@@ -423,30 +457,47 @@ async function getFileMetadata(filename) {
   return { thumbnail: null, title: filename };
 }
 
-async function loadFiles() {
+async function loadFiles(forceRefresh = false) {
   try {
     const container = document.getElementById('files');
     const deviceInfo = await getDeviceInfo();
     
-    // Try to get from server first
+    console.log(` Loading files for ${deviceInfo.device}...`);
+    
+    // Try to get from server first with aggressive cache busting
     let files = [];
     try {
-      const res = await fetch('/files', {
+      const timestamp = new Date().getTime();
+      const res = await fetch(`/files?t=${timestamp}`, {
         cache: 'no-store',
         headers: {
-          'Cache-Control': 'no-cache'
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache',
+          'Expires': '0'
         }
       });
       
       if (res.ok) {
         files = await res.json();
+        console.log(` Received ${files.length} files from server:`, files);
+        
+        // Check if file list actually changed
+        const newHash = JSON.stringify(files.sort());
+        if (!forceRefresh && newHash === lastFileListHash) {
+          console.log(' File list unchanged, skipping update');
+          return;
+        }
+        lastFileListHash = newHash;
+        
         // Save to IndexedDB for offline access
         for (const file of files) {
           await saveDownloadedFile(file, { synced: true });
         }
+      } else {
+        console.warn('Failed to fetch files from server:', res.status);
       }
     } catch (err) {
-      console.log('Offline - loading from cache');
+      console.log(' Offline or error - loading from cache:', err.message);
       // If offline, load from IndexedDB
       const cached = await getDownloadedFiles();
       files = cached.map(f => f.filename);
@@ -462,8 +513,11 @@ async function loadFiles() {
           <i class="fas fa-film"></i> No downloads on this device yet
         </div>
       `;
+      console.log(' No files found for this device');
       return;
     }
+    
+    console.log(` Displaying ${files.length} files`);
     
     container.innerHTML = '';
     
@@ -525,6 +579,8 @@ async function loadFiles() {
         e.stopPropagation();
         const encodedFilename = encodeURIComponent(filename);
         
+        console.log(` Download clicked: ${filename} (${isMobile ? 'mobile' : 'desktop'})`);
+        
         if (isMobile && (filename.endsWith('.mp4') || filename.endsWith('.webm'))) {
           // On mobile, use stream endpoint for better playback
           window.open(`/stream/${encodedFilename}`, '_blank');
@@ -539,7 +595,7 @@ async function loadFiles() {
     }
     
   } catch (err) {
-    console.error('Error loading files:', err);
+    console.error(' Error loading files:', err);
   }
 }
 
@@ -612,13 +668,17 @@ window.addEventListener('load', () => {
 });
 
 // Initialize
-loadFiles();
+console.log(' App initializing...');
+loadFiles(true); // Force initial load
 
 // Auto-preview on page load (if URL exists)
 setTimeout(preview, 500);
 
-// Refresh file list every 15 seconds (more frequent for mobile)
-setInterval(loadFiles, 15000);
+// Refresh file list more frequently for mobile to catch new downloads
+const isMobileDevice = getDeviceType() === 'mobile';
+const refreshInterval = isMobileDevice ? 10000 : 15000; // 10s for mobile, 15s for desktop
+console.log(` File refresh interval: ${refreshInterval}ms (${isMobileDevice ? 'mobile' : 'desktop'})`);
+setInterval(() => loadFiles(false), refreshInterval);
 
 // ==================== EXPOSE PUBLIC API ====================
 window.app = {
