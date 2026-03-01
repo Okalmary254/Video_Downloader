@@ -50,6 +50,8 @@ function updateOnlineStatus() {
     offlineIndicator.style.display = 'none';
     showStatus('Back online!', 'success');
     syncOfflineDownloads();
+    // Refresh files when back online
+    loadFiles();
   } else {
     offlineIndicator.style.display = 'flex';
     showStatus('You are offline. Downloads will be queued.', 'info');
@@ -200,7 +202,8 @@ let currentJob = null;
 let progressInterval = null;
 let previewData = null;
 let progressRetryCount = 0;
-const MAX_RETRIES = 3;
+const MAX_RETRIES = 5;
+const PROGRESS_INTERVAL = 2000; // 2 seconds for mobile
 
 // ==================== DOM ELEMENTS ====================
 const urlInput = document.getElementById('url');
@@ -299,7 +302,7 @@ async function startDownload() {
     
     // Start polling for progress
     if (progressInterval) clearInterval(progressInterval);
-    progressInterval = setInterval(trackProgress, 1500); // Increased to 1.5 seconds for mobile
+    progressInterval = setInterval(trackProgress, PROGRESS_INTERVAL);
     
   } catch (err) {
     console.error(err);
@@ -315,10 +318,14 @@ async function trackProgress() {
   try {
     // Add timeout for mobile networks
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15 second timeout for mobile
     
     const res = await fetch(`/progress/${currentJob}`, {
-      signal: controller.signal
+      signal: controller.signal,
+      cache: 'no-store',
+      headers: {
+        'Cache-Control': 'no-cache'
+      }
     });
     
     clearTimeout(timeoutId);
@@ -334,7 +341,7 @@ async function trackProgress() {
     if (data.status === 'downloading') {
       const percent = parseFloat(data.percent) || 0;
       progressBar.style.width = percent + '%';
-      showStatus(`Downloading: ${data.percent}%`, 'info');
+      showStatus(`Downloading: ${data.percent}% - ${data.speed || ''}`, 'info');
       
     } else if (data.status === 'processing') {
       showStatus('Processing video...', 'info');
@@ -361,8 +368,8 @@ async function trackProgress() {
       downloadBtn.disabled = false;
       downloadBtn.innerHTML = '<i class="fas fa-cloud-download-alt"></i> Download';
       
-      // Refresh file list
-      loadFiles();
+      // Refresh file list immediately
+      await loadFiles();
       
       // Reset progress after 3 seconds
       setTimeout(() => {
@@ -371,30 +378,42 @@ async function trackProgress() {
       
     } else if (data.status === 'error') {
       throw new Error(data.error || 'Download failed');
+    } else if (data.status === 'starting') {
+      showStatus('Starting download...', 'info');
+      progressBar.style.width = '2%';
     }
     
   } catch (err) {
     console.error('Progress tracking error:', err);
     
+    // Don't give up immediately on mobile
+    if (err.name === 'AbortError') {
+      console.log('Progress request timeout on mobile');
+      // Just retry silently
+      return;
+    }
+    
     // Retry logic for mobile networks
     if (progressRetryCount < MAX_RETRIES) {
       progressRetryCount++;
       console.log(`Retrying progress fetch (${progressRetryCount}/${MAX_RETRIES})...`);
-      // Don't clear interval, let it retry
+      // Don't show error, just retry
     } else {
-      // Max retries reached, show error but don't stop completely
-      showStatus('Connection unstable. Download may still be running...', 'info');
+      // Max retries reached, but don't completely fail
+      showStatus('Download in progress... Check back soon', 'info');
       progressRetryCount = 0;
       
-      // Don't clear interval or disable button - let it keep trying
-      // The download might still complete on the server
+      // Refresh files anyway in case download completed
+      setTimeout(() => loadFiles(), 5000);
     }
   }
 }
 
 async function getFileMetadata(filename) {
   try {
-    const res = await fetch(`/file-metadata/${encodeURIComponent(filename)}`);
+    const res = await fetch(`/file-metadata/${encodeURIComponent(filename)}`, {
+      cache: 'no-store'
+    });
     if (res.ok) {
       return await res.json();
     }
@@ -412,7 +431,13 @@ async function loadFiles() {
     // Try to get from server first
     let files = [];
     try {
-      const res = await fetch('/files');
+      const res = await fetch('/files', {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache'
+        }
+      });
+      
       if (res.ok) {
         files = await res.json();
         // Save to IndexedDB for offline access
@@ -442,7 +467,7 @@ async function loadFiles() {
     
     container.innerHTML = '';
     
-    // Add device indicator
+    // Add device indicator with count
     const deviceHeader = document.createElement('div');
     deviceHeader.className = 'device-indicator';
     deviceHeader.innerHTML = `
@@ -461,6 +486,7 @@ async function loadFiles() {
       // Thumbnail image
       const thumbImg = document.createElement('img');
       thumbImg.className = 'thumb-img';
+      thumbImg.loading = 'lazy'; // Lazy load images
       
       if (metadata.thumbnail) {
         thumbImg.src = metadata.thumbnail;
@@ -591,8 +617,8 @@ loadFiles();
 // Auto-preview on page load (if URL exists)
 setTimeout(preview, 500);
 
-// Refresh file list every 30 seconds
-setInterval(loadFiles, 30000);
+// Refresh file list every 15 seconds (more frequent for mobile)
+setInterval(loadFiles, 15000);
 
 // ==================== EXPOSE PUBLIC API ====================
 window.app = {
