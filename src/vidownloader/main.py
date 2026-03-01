@@ -18,9 +18,8 @@ from fastapi.staticfiles import StaticFiles
 
 app = FastAPI()
 
-
 # Base paths
-BASE_DIR = Path(__file__).resolve().parent.parent.parent  # project root
+BASE_DIR = Path(__file__).resolve().parent  # project root (main.py location)
 WEB_DIR = BASE_DIR / "web"
 DOWNLOAD_FOLDER = BASE_DIR / "downloads"
 THUMBNAIL_FOLDER = BASE_DIR / "thumbnails"
@@ -29,24 +28,38 @@ THUMBNAIL_FOLDER = BASE_DIR / "thumbnails"
 DOWNLOAD_FOLDER.mkdir(exist_ok=True)
 THUMBNAIL_FOLDER.mkdir(exist_ok=True)
 
+# Create web folder if it doesn't exist
+WEB_DIR.mkdir(exist_ok=True)
+
 # Mount static files
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 # Serve index.html
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    return (WEB_DIR / "index.html").read_text(encoding="utf-8")
+    index_path = WEB_DIR / "index.html"
+    if index_path.exists():
+        return index_path.read_text(encoding="utf-8")
+    return HTMLResponse(content="<h1>Video Downloader</h1><p>index.html not found</p>", status_code=200)
 
 # Serve JS & CSS explicitly (optional since mounted in /static)
 @app.get("/app.js")
 async def get_app_js():
-    return FileResponse(WEB_DIR / "app.js", media_type="application/javascript")
+    js_path = WEB_DIR / "app.js"
+    if js_path.exists():
+        return FileResponse(js_path, media_type="application/javascript")
+    return JSONResponse(status_code=404, content={"error": "app.js not found"})
 
 @app.get("/styles.css")
 async def get_styles_css():
-    return FileResponse(WEB_DIR / "styles.css", media_type="text/css")
+    css_path = WEB_DIR / "styles.css"
+    if css_path.exists():
+        return FileResponse(css_path, media_type="text/css")
+    return JSONResponse(status_code=404, content={"error": "styles.css not found"})
 
+# Global progress store with lock for thread safety
 progress_store = {}
+progress_lock = Lock()
 file_metadata = {}
 
 AUTO_DELETE_AFTER = 3600
@@ -60,13 +73,19 @@ def auto_cleanup():
             path = os.path.join(DOWNLOAD_FOLDER, file)
             if os.path.isfile(path):
                 if now - os.path.getmtime(path) > AUTO_DELETE_AFTER:
-                    os.remove(path)
+                    try:
+                        os.remove(path)
+                    except:
+                        pass
         
         # Clean thumbnails
         for thumb in THUMBNAIL_FOLDER.iterdir():
             if thumb.is_file():
                 if time.time() - thumb.stat().st_mtime > AUTO_DELETE_AFTER:
-                    thumb.unlink()
+                    try:
+                        thumb.unlink()
+                    except:
+                        pass
         
         time.sleep(300)
 
@@ -80,8 +99,6 @@ def sanitize_filename(filename):
 
 
 def download_task(job_id, url, format_option):
-    progress_store = defaultdict(dict)
-    progress_lock = Lock()
     def progress_hook(d):
         with progress_lock:
             if d['status'] == 'downloading':
@@ -92,16 +109,26 @@ def download_task(job_id, url, format_option):
                 # Extract numeric value
                 percent_match = re.search(r'(\d+(?:\.\d+)?)', percent_str)
                 percent = percent_match.group(1) if percent_match else '0'
-            
-                progress_store[job_id] = {
-                    "status": "downloading",
-                    "percent": percent,
-                    "speed": d.get('_speed_str', 'N/A').strip(),
-                    "eta": d.get('_eta_str', 'N/A').strip()
-                }
+                
+                # Update progress store
+                if job_id in progress_store:
+                    progress_store[job_id].update({
+                        "status": "downloading",
+                        "percent": percent,
+                        "speed": d.get('_speed_str', 'N/A').strip(),
+                        "eta": d.get('_eta_str', 'N/A').strip()
+                    })
+                else:
+                    progress_store[job_id] = {
+                        "status": "downloading",
+                        "percent": percent,
+                        "speed": d.get('_speed_str', 'N/A').strip(),
+                        "eta": d.get('_eta_str', 'N/A').strip()
+                    }
             elif d['status'] == 'finished':
-                progress_store[job_id]["status"] = "processing"
-                progress_store[job_id]["filename"] = os.path.basename(d.get('filename', ''))
+                if job_id in progress_store:
+                    progress_store[job_id]["status"] = "processing"
+                    progress_store[job_id]["filename"] = os.path.basename(d.get('filename', ''))
 
     # Format mapping for yt-dlp
     format_map = {
@@ -115,7 +142,7 @@ def download_task(job_id, url, format_option):
 
     # Base options
     ydl_opts = {
-        'outtmpl': os.path.join(DOWNLOAD_FOLDER, '%(title)s.%(ext)s'),
+        'outtmpl': str(DOWNLOAD_FOLDER / '%(title)s.%(ext)s'),
         'format': actual_format,
         'progress_hooks': [progress_hook],
         'quiet': True,
@@ -147,6 +174,10 @@ def download_task(job_id, url, format_option):
             if not info:
                 raise Exception("Could not extract video info")
             
+            # Handle playlist
+            if 'entries' in info and info['entries']:
+                info = info['entries'][0]
+            
             # Get the actual filename that will be created
             video_filename = ydl.prepare_filename(info)
             video_basename = os.path.basename(video_filename)
@@ -156,7 +187,9 @@ def download_task(job_id, url, format_option):
                 video_basename = video_basename.rsplit('.', 1)[0] + '.mp3'
             
             # Update progress with title
-            progress_store[job_id]["title"] = info.get('title', 'Unknown')
+            with progress_lock:
+                if job_id in progress_store:
+                    progress_store[job_id]["title"] = info.get('title', 'Unknown')
             
             # Download the video
             ydl.download([url])
@@ -165,7 +198,6 @@ def download_task(job_id, url, format_option):
             if info.get('thumbnail'):
                 try:
                     thumb_url = info['thumbnail']
-                    thumb_ext = 'jpg'
                     
                     # Create request with headers
                     req = urllib.request.Request(
@@ -176,9 +208,20 @@ def download_task(job_id, url, format_option):
                     )
                     
                     with urllib.request.urlopen(req, timeout=15) as response:
+                        # Determine thumbnail extension from content-type
+                        content_type = response.headers.get('content-type', '')
+                        if 'jpeg' in content_type or 'jpg' in content_type:
+                            thumb_ext = 'jpg'
+                        elif 'png' in content_type:
+                            thumb_ext = 'png'
+                        elif 'webp' in content_type:
+                            thumb_ext = 'webp'
+                        else:
+                            thumb_ext = 'jpg'
+                        
                         # Save thumbnail
                         thumb_filename = f"{job_id}.{thumb_ext}"
-                        thumb_path = os.path.join(THUMBNAIL_FOLDER, thumb_filename)
+                        thumb_path = THUMBNAIL_FOLDER / thumb_filename
                         
                         with open(thumb_path, 'wb') as f:
                             f.write(response.read())
@@ -194,17 +237,19 @@ def download_task(job_id, url, format_option):
                     print(f"Thumbnail download failed: {e}")
             
             # Mark as finished
-            progress_store[job_id] = {
-                "status": "finished",
-                "filename": video_basename,
-                "title": info.get('title', 'Unknown')
-            }
+            with progress_lock:
+                progress_store[job_id] = {
+                    "status": "finished",
+                    "filename": video_basename,
+                    "title": info.get('title', 'Unknown')
+                }
             
     except Exception as e:
-        progress_store[job_id] = {
-            "status": "error",
-            "error": str(e)
-        }
+        with progress_lock:
+            progress_store[job_id] = {
+                "status": "error",
+                "error": str(e)
+            }
         print(f"Download error: {e}")
 
 
@@ -250,13 +295,13 @@ async def preview_video(url: str = Form(...)):
             )
 
         # Handle playlist or single video
-        if 'entries' in info:
+        if 'entries' in info and info['entries']:
             # It's a playlist - take first entry
             info = info['entries'][0]
 
-        # Format duration
+        # Format duration - FIXED: Check for None before comparison
         duration = info.get('duration')
-        if duration:
+        if duration is not None and duration > 0:
             duration = int(duration)
             minutes = duration // 60
             seconds = duration % 60
@@ -272,6 +317,7 @@ async def preview_video(url: str = Form(...)):
         # Format file size
         filesize = info.get('filesize') or info.get('filesize_approx')
         if filesize:
+            filesize = float(filesize)
             if filesize > 1024 * 1024 * 1024:
                 filesize_str = f"{filesize / (1024*1024*1024):.1f} GB"
             elif filesize > 1024 * 1024:
@@ -281,22 +327,33 @@ async def preview_video(url: str = Form(...)):
         else:
             filesize_str = "Unknown"
 
-        # Get best thumbnail
+        # Get best thumbnail - FIXED: Handle None values in sort key
         thumbnail = info.get('thumbnail')
         thumbnails = info.get('thumbnails', [])
         if thumbnails and not thumbnail:
-            # Get the highest resolution thumbnail
-            thumbnails.sort(key=lambda x: x.get('height', 0) or x.get('width', 0) or 0, reverse=True)
-            thumbnail = thumbnails[0].get('url')
+            # Filter out entries with None height/width
+            valid_thumbnails = [t for t in thumbnails if t.get('height') is not None or t.get('width') is not None]
+            if valid_thumbnails:
+                valid_thumbnails.sort(
+                    key=lambda x: (x.get('height') or 0, x.get('width') or 0), 
+                    reverse=True
+                )
+                thumbnail = valid_thumbnails[0].get('url')
+            elif thumbnails:
+                # Fallback to first thumbnail if all have None dimensions
+                thumbnail = thumbnails[0].get('url')
 
         # Format view count
         view_count = info.get('view_count', 0)
-        if view_count > 1000000:
-            view_str = f"{view_count/1000000:.1f}M"
-        elif view_count > 1000:
-            view_str = f"{view_count/1000:.1f}K"
+        if view_count:
+            if view_count > 1000000:
+                view_str = f"{view_count/1000000:.1f}M"
+            elif view_count > 1000:
+                view_str = f"{view_count/1000:.1f}K"
+            else:
+                view_str = str(view_count)
         else:
-            view_str = str(view_count)
+            view_str = "0"
 
         response_data = {
             "title": info.get('title', 'Unknown'),
@@ -332,6 +389,8 @@ async def preview_video(url: str = Form(...)):
     except Exception as e:
         error_msg = str(e)
         print(f"Unexpected error in preview: {error_msg}")
+        import traceback
+        traceback.print_exc()
         return JSONResponse(
             status_code=500,
             content={"error": f"Preview failed: {error_msg}"}
@@ -352,11 +411,12 @@ async def start_download(background_tasks: BackgroundTasks,
 
     job_id = str(uuid.uuid4())
 
-    progress_store[job_id] = {
-        "status": "starting",
-        "percent": "0",
-        "message": "Initializing download..."
-    }
+    with progress_lock:
+        progress_store[job_id] = {
+            "status": "starting",
+            "percent": "0",
+            "message": "Initializing download..."
+        }
 
     background_tasks.add_task(download_task, job_id, url.strip(), quality)
 
@@ -365,10 +425,10 @@ async def start_download(background_tasks: BackgroundTasks,
 
 @app.get("/progress/{job_id}")
 async def get_progress(job_id: str):
-    if job_id in progress_store:
-        return progress_store[job_id]
+    with progress_lock:
+        if job_id in progress_store:
+            return progress_store[job_id]
     return {"status": "unknown"}
-
 
 
 @app.get("/files")
@@ -407,7 +467,6 @@ async def list_files():
 
 @app.api_route("/download-file/{filename}", methods=["GET", "HEAD"])
 async def download_file(filename: str):
-
     # Prevent directory traversal
     filename = os.path.basename(filename)
     path = os.path.join(DOWNLOAD_FOLDER, filename)
@@ -432,9 +491,10 @@ async def download_file(filename: str):
     )
 
     return response
+
+
 @app.get("/file-metadata/{filename}", response_class=JSONResponse)
-@app.head("/file-metadata/{filename}", response_class=Response)  # support HEAD
-@app.get("/file-metadata/{filename}")
+@app.head("/file-metadata/{filename}", response_class=Response)
 async def get_file_metadata_endpoint(filename: str):
     """Get metadata including thumbnail for a specific file"""
     filename = os.path.basename(filename)
@@ -455,14 +515,15 @@ async def get_file_metadata_endpoint(filename: str):
         'duration': 'Unknown'
     }
 
+
 @app.get("/thumbnails/{filename}", response_class=FileResponse)
-@app.head("/thumbnails/{filename}", response_class=Response)  # support HEAD
+@app.head("/thumbnails/{filename}", response_class=Response)
 async def get_thumbnail(filename: str):
     # Security: prevent directory traversal
     filename = os.path.basename(filename)
-    path = os.path.join(THUMBNAIL_FOLDER, filename)
+    path = THUMBNAIL_FOLDER / filename
     
-    if os.path.exists(path):
+    if path.exists():
         return FileResponse(path, media_type='image/jpeg')
     
     return JSONResponse(
@@ -476,8 +537,8 @@ async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "downloads_folder": os.path.exists(DOWNLOAD_FOLDER),
-        "thumbnails_folder": os.path.exists(THUMBNAIL_FOLDER),
+        "downloads_folder": DOWNLOAD_FOLDER.exists(),
+        "thumbnails_folder": THUMBNAIL_FOLDER.exists(),
         "ffmpeg_available": check_ffmpeg()
     }
 
