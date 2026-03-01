@@ -147,6 +147,17 @@ async def get_sw_js():
     
     return JSONResponse(status_code=404, content={"error": "sw.js not found"})
 
+@app.get("/icons/{filename}")
+async def get_icon(filename: str):
+    """Serve icon files"""
+    filename = os.path.basename(filename)
+    icon_path = WEB_DIR / "icons" / filename
+    
+    if icon_path.exists():
+        return FileResponse(icon_path, media_type='image/png')
+    
+    return JSONResponse(status_code=404, content={"error": "Icon not found"})
+
 # Global progress store with lock for thread safety
 progress_store = {}
 progress_lock = Lock()
