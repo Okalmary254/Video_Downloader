@@ -17,4 +17,3 @@ aiofiles==24.1.0
 cachetools==5.3.0
 aiocache==0.11.1
 requests==2.31.0
-urllib3==2.31.0
