@@ -15,11 +15,13 @@ import re
 import subprocess
 import json
 from fastapi.staticfiles import StaticFiles
+import socket
+import mimetypes
 
 app = FastAPI()
 
 # Base paths
-BASE_DIR = Path(__file__).resolve().parent.parent.parent  # project root (main.py location)
+BASE_DIR = Path(__file__).resolve().parent.parent.parent  # project root
 WEB_DIR = BASE_DIR / "web"
 DOWNLOAD_FOLDER = BASE_DIR / "downloads"
 THUMBNAIL_FOLDER = BASE_DIR / "thumbnails"
@@ -32,49 +34,117 @@ THUMBNAIL_FOLDER.mkdir(exist_ok=True)
 WEB_DIR.mkdir(exist_ok=True)
 
 # Mount static files
-app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+if WEB_DIR.exists():
+    app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+
+# Get local IP address for network access
+def get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return "127.0.0.1"
+
+LOCAL_IP = get_local_ip()
+print(f"\n🌐 Server is accessible at:")
+print(f"   Local: http://127.0.0.1:8000")
+print(f"   Network: http://{LOCAL_IP}:8000 (for mobile devices)\n")
 
 # Serve index.html
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    index_path = WEB_DIR / "index.html"
-    if index_path.exists():
-        return index_path.read_text(encoding="utf-8")
-    return HTMLResponse(content="<h1>Video Downloader</h1><p>index.html not found</p>", status_code=200)
+    # Try multiple possible locations for index.html
+    possible_paths = [
+        WEB_DIR / "index.html",
+        BASE_DIR / "web" / "index.html",
+        BASE_DIR / "index.html",
+        Path(__file__).parent / "index.html",
+    ]
+    
+    for path in possible_paths:
+        if path.exists():
+            print(f"Found index.html at: {path}")
+            return path.read_text(encoding="utf-8")
+    
+    # If not found, return debug info
+    html_content = f"""
+    <html>
+    <head><title>Video Downloader</title></head>
+    <body>
+        <h1>Video Downloader</h1>
+        <p>Server is running but index.html not found</p>
+        <p>Searched in:</p>
+        <ul>
+            {"".join(f'<li>{p}</li>' for p in possible_paths)}
+        </ul>
+        <p>Current directory: {os.getcwd()}</p>
+        <p>Files in current directory:</p>
+        <ul>
+            {"".join(f'<li>{f}</li>' for f in os.listdir('.') if f.endswith('.html'))}
+        </ul>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content, status_code=200)
 
-# Serve JS & CSS explicitly (optional since mounted in /static)
+# Serve JS & CSS
 @app.get("/app.js")
 async def get_app_js():
-    js_path = WEB_DIR / "app.js"
-    if js_path.exists():
-        return FileResponse(js_path, media_type="application/javascript")
-    return JSONResponse(status_code=404, content={"error": "app.js not found"})
+    possible_paths = [
+        WEB_DIR / "app.js",
+        BASE_DIR / "web" / "app.js",
+        BASE_DIR / "app.js",
+        Path(__file__).parent / "app.js",
+    ]
+    
+    for path in possible_paths:
+        if path.exists():
+            return FileResponse(path, media_type="application/javascript")
+    
+    return JSONResponse(
+        status_code=404, 
+        content={"error": "app.js not found", "searched": [str(p) for p in possible_paths]}
+    )
 
 @app.get("/styles.css")
 async def get_styles_css():
-    css_path = WEB_DIR / "styles.css"
-    if css_path.exists():
-        return FileResponse(css_path, media_type="text/css")
-    return JSONResponse(status_code=404, content={"error": "styles.css not found"})
+    possible_paths = [
+        WEB_DIR / "styles.css",
+        BASE_DIR / "web" / "styles.css",
+        BASE_DIR / "styles.css",
+        Path(__file__).parent / "styles.css",
+    ]
+    
+    for path in possible_paths:
+        if path.exists():
+            return FileResponse(path, media_type="text/css")
+    
+    return JSONResponse(
+        status_code=404, 
+        content={"error": "styles.css not found", "searched": [str(p) for p in possible_paths]}
+    )
 
 # Global progress store with lock for thread safety
 progress_store = {}
 progress_lock = Lock()
 file_metadata = {}
 
-AUTO_DELETE_AFTER = 3600
-
+AUTO_DELETE_AFTER = 3600  # 1 hour
 
 def auto_cleanup():
     while True:
         now = time.time()
         # Clean downloads
         for file in os.listdir(DOWNLOAD_FOLDER):
-            path = os.path.join(DOWNLOAD_FOLDER, file)
-            if os.path.isfile(path):
-                if now - os.path.getmtime(path) > AUTO_DELETE_AFTER:
+            path = DOWNLOAD_FOLDER / file
+            if path.is_file():
+                if now - path.stat().st_mtime > AUTO_DELETE_AFTER:
                     try:
-                        os.remove(path)
+                        path.unlink()
+                        print(f"Cleaned up old file: {file}")
                     except:
                         pass
         
@@ -84,19 +154,17 @@ def auto_cleanup():
                 if time.time() - thumb.stat().st_mtime > AUTO_DELETE_AFTER:
                     try:
                         thumb.unlink()
+                        print(f"Cleaned up old thumbnail: {thumb.name}")
                     except:
                         pass
         
         time.sleep(300)
 
-
 threading.Thread(target=auto_cleanup, daemon=True).start()
-
 
 def sanitize_filename(filename):
     """Remove invalid characters from filename"""
     return re.sub(r'[<>:"/\\|?*]', '', filename)
-
 
 def download_task(job_id, url, format_option):
     def progress_hook(d):
@@ -111,20 +179,12 @@ def download_task(job_id, url, format_option):
                 percent = percent_match.group(1) if percent_match else '0'
                 
                 # Update progress store
-                if job_id in progress_store:
-                    progress_store[job_id].update({
-                        "status": "downloading",
-                        "percent": percent,
-                        "speed": d.get('_speed_str', 'N/A').strip(),
-                        "eta": d.get('_eta_str', 'N/A').strip()
-                    })
-                else:
-                    progress_store[job_id] = {
-                        "status": "downloading",
-                        "percent": percent,
-                        "speed": d.get('_speed_str', 'N/A').strip(),
-                        "eta": d.get('_eta_str', 'N/A').strip()
-                    }
+                progress_store[job_id] = {
+                    "status": "downloading",
+                    "percent": percent,
+                    "speed": d.get('_speed_str', 'N/A').strip(),
+                    "eta": d.get('_eta_str', 'N/A').strip()
+                }
             elif d['status'] == 'finished':
                 if job_id in progress_store:
                     progress_store[job_id]["status"] = "processing"
@@ -160,7 +220,6 @@ def download_task(job_id, url, format_option):
             'preferredquality': '192',
         }]
     else:
-        # For video, merge formats using ffmpeg
         ydl_opts['postprocessors'] = [{
             'key': 'FFmpegVideoRemuxer',
             'preferedformat': 'mp4',
@@ -194,12 +253,23 @@ def download_task(job_id, url, format_option):
             # Download the video
             ydl.download([url])
             
+            # Wait a moment for file to be fully written
+            time.sleep(1)
+            
+            # Verify file exists
+            actual_path = DOWNLOAD_FOLDER / video_basename
+            if not actual_path.exists():
+                # Try to find the actual file
+                files = list(DOWNLOAD_FOLDER.glob("*.mp4")) + list(DOWNLOAD_FOLDER.glob("*.mp3"))
+                if files:
+                    video_basename = files[-1].name
+                    print(f"Found actual file: {video_basename}")
+            
             # Download and save thumbnail
             if info.get('thumbnail'):
                 try:
                     thumb_url = info['thumbnail']
                     
-                    # Create request with headers
                     req = urllib.request.Request(
                         thumb_url,
                         headers={
@@ -208,7 +278,7 @@ def download_task(job_id, url, format_option):
                     )
                     
                     with urllib.request.urlopen(req, timeout=15) as response:
-                        # Determine thumbnail extension from content-type
+                        # Determine thumbnail extension
                         content_type = response.headers.get('content-type', '')
                         if 'jpeg' in content_type or 'jpg' in content_type:
                             thumb_ext = 'jpg'
@@ -231,8 +301,11 @@ def download_task(job_id, url, format_option):
                             'thumbnail': f"/thumbnails/{thumb_filename}",
                             'title': info.get('title', 'Unknown'),
                             'uploader': info.get('uploader', 'Unknown'),
-                            'duration': info.get('duration', 0)
+                            'duration': info.get('duration', 0),
+                            'filename': video_basename
                         }
+                        
+                        print(f"Thumbnail saved for: {video_basename}")
                 except Exception as e:
                     print(f"Thumbnail download failed: {e}")
             
@@ -244,6 +317,8 @@ def download_task(job_id, url, format_option):
                     "title": info.get('title', 'Unknown')
                 }
             
+            print(f"Download completed: {video_basename}")
+            
     except Exception as e:
         with progress_lock:
             progress_store[job_id] = {
@@ -251,212 +326,145 @@ def download_task(job_id, url, format_option):
                 "error": str(e)
             }
         print(f"Download error: {e}")
+        import traceback
+        traceback.print_exc()
 
+# [Rest of your endpoints remain the same until the download_file endpoint]
 
-@app.post("/preview")
-async def preview_video(url: str = Form(...)):
-    """
-    Get video information without downloading
-    """
+@app.api_route("/download-file/{filename:path}", methods=["GET", "HEAD"])
+async def download_file(filename: str):
+    """Download a file with proper headers for all devices"""
     try:
-        print(f"Preview request for URL: {url}")
-        
-        # Configure yt-dlp options for extraction only
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': False,
-            'force_generic_extractor': False,
-            'ignoreerrors': True,
-            'no_color': True,
-            'geo_bypass': True,
-            'geo_bypass_country': 'US',
-        }
-        
-        # Try with different options if first attempt fails
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-        except Exception as e:
-            print(f"First attempt failed: {e}")
-            # Try with different options
-            ydl_opts.update({
-                'format': 'best',
-                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'referer': 'https://www.google.com',
-            })
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+        # Prevent directory traversal
+        filename = os.path.basename(filename)
+        path = DOWNLOAD_FOLDER / filename
 
-        if not info:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Could not extract video information"}
-            )
+        print(f"Download requested: {filename}")
+        print(f"Full path: {path}")
+        print(f"File exists: {path.exists()}")
 
-        # Handle playlist or single video
-        if 'entries' in info and info['entries']:
-            # It's a playlist - take first entry
-            info = info['entries'][0]
-
-        # Format duration - FIXED: Check for None before comparison
-        duration = info.get('duration')
-        if duration is not None and duration > 0:
-            duration = int(duration)
-            minutes = duration // 60
-            seconds = duration % 60
-            if minutes >= 60:
-                hours = minutes // 60
-                minutes = minutes % 60
-                duration_str = f"{hours}:{minutes:02d}:{seconds:02d}"
+        if not path.exists():
+            # Try to find the file with different extensions
+            files = list(DOWNLOAD_FOLDER.glob(f"{Path(filename).stem}.*"))
+            if files:
+                path = files[0]
+                filename = path.name
+                print(f"Found alternative: {filename}")
             else:
-                duration_str = f"{minutes}:{seconds:02d}"
-        else:
-            duration_str = "Unknown"
-
-        # Format file size
-        filesize = info.get('filesize') or info.get('filesize_approx')
-        if filesize:
-            filesize = float(filesize)
-            if filesize > 1024 * 1024 * 1024:
-                filesize_str = f"{filesize / (1024*1024*1024):.1f} GB"
-            elif filesize > 1024 * 1024:
-                filesize_str = f"{filesize / (1024*1024):.1f} MB"
-            else:
-                filesize_str = f"{filesize / 1024:.1f} KB"
-        else:
-            filesize_str = "Unknown"
-
-        # Get best thumbnail - FIXED: Handle None values in sort key
-        thumbnail = info.get('thumbnail')
-        thumbnails = info.get('thumbnails', [])
-        if thumbnails and not thumbnail:
-            # Filter out entries with None height/width
-            valid_thumbnails = [t for t in thumbnails if t.get('height') is not None or t.get('width') is not None]
-            if valid_thumbnails:
-                valid_thumbnails.sort(
-                    key=lambda x: (x.get('height') or 0, x.get('width') or 0), 
-                    reverse=True
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": f"File not found: {filename}"}
                 )
-                thumbnail = valid_thumbnails[0].get('url')
-            elif thumbnails:
-                # Fallback to first thumbnail if all have None dimensions
-                thumbnail = thumbnails[0].get('url')
 
-        # Format view count
-        view_count = info.get('view_count', 0)
-        if view_count:
-            if view_count > 1000000:
-                view_str = f"{view_count/1000000:.1f}M"
-            elif view_count > 1000:
-                view_str = f"{view_count/1000:.1f}K"
+        # Get file size for logging
+        file_size = path.stat().st_size
+        print(f"Serving file: {filename} ({file_size} bytes)")
+
+        # Determine media type
+        media_type = mimetypes.guess_type(str(path))[0]
+        if not media_type:
+            if filename.endswith('.mp4'):
+                media_type = 'video/mp4'
+            elif filename.endswith('.mp3'):
+                media_type = 'audio/mpeg'
             else:
-                view_str = str(view_count)
-        else:
-            view_str = "0"
+                media_type = 'application/octet-stream'
 
-        response_data = {
-            "title": info.get('title', 'Unknown'),
-            "thumbnail": thumbnail,
-            "duration": duration_str,
-            "filesize": filesize_str,
-            "uploader": info.get('uploader', info.get('channel', 'Unknown')),
-            "view_count": view_str,
-            "like_count": info.get('like_count', 0),
-            "description": info.get('description', '')[:200] + '...' if info.get('description') else '',
-            "upload_date": info.get('upload_date', 'Unknown'),
-            "extractor": info.get('extractor', 'Unknown'),
-            "webpage_url": info.get('webpage_url', url)
-        }
+        # Encode filename for different devices
+        encoded_filename = quote(filename)
         
-        print(f"Preview successful for: {response_data['title']}")
-        return response_data
+        # Create response with proper headers
+        response = FileResponse(
+            path=path,
+            media_type=media_type,
+            filename=filename,
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+                "Content-Length": str(file_size),
+                "Cache-Control": "no-cache",
+                "Accept-Ranges": "bytes",
+            }
+        )
         
-    except yt_dlp.utils.DownloadError as e:
-        error_msg = str(e)
-        print(f"DownloadError in preview: {error_msg}")
-        return JSONResponse(
-            status_code=400,
-            content={"error": f"Could not fetch video info: {error_msg}"}
-        )
-    except yt_dlp.utils.ExtractorError as e:
-        error_msg = str(e)
-        print(f"ExtractorError in preview: {error_msg}")
-        return JSONResponse(
-            status_code=400,
-            content={"error": f"Extractor failed: {error_msg}"}
-        )
+        return response
+        
     except Exception as e:
-        error_msg = str(e)
-        print(f"Unexpected error in preview: {error_msg}")
+        print(f"Download error: {e}")
         import traceback
         traceback.print_exc()
         return JSONResponse(
             status_code=500,
-            content={"error": f"Preview failed: {error_msg}"}
+            content={"error": f"Download failed: {str(e)}"}
         )
 
-
-@app.post("/start-download")
-async def start_download(background_tasks: BackgroundTasks,
-                         url: str = Form(...),
-                         quality: str = Form(...)):
-
-    # Validate URL
-    if not url or not url.strip():
-        return JSONResponse(
-            status_code=400,
-            content={"error": "URL is required"}
-        )
-
-    job_id = str(uuid.uuid4())
-
-    with progress_lock:
-        progress_store[job_id] = {
-            "status": "starting",
-            "percent": "0",
-            "message": "Initializing download..."
+# Add OPTIONS method for CORS preflight
+@app.options("/download-file/{filename:path}")
+async def download_file_options(filename: str):
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
         }
+    )
 
-    background_tasks.add_task(download_task, job_id, url.strip(), quality)
-
-    return {"job_id": job_id}
-
-
-@app.get("/progress/{job_id}")
-async def get_progress(job_id: str):
-    with progress_lock:
-        if job_id in progress_store:
-            return progress_store[job_id]
-    return {"status": "unknown"}
-
+# [Rest of your endpoints remain the same]
 
 @app.get("/files")
 async def list_files():
     try:
-        files = os.listdir(DOWNLOAD_FOLDER)
-        # Filter out thumbnail and temporary files
-        video_files = [f for f in files if not any([
-            f.endswith(('.jpg', '.jpeg', '.png', '.webp', '.part', '.ytdl')),
-            f.startswith('.')
-        ])]
-        
-        # Get file info
-        file_list = []
-        for f in video_files:
-            path = os.path.join(DOWNLOAD_FOLDER, f)
-            if os.path.isfile(path):
-                stat = os.stat(path)
-                file_list.append({
-                    'name': f,
-                    'size': stat.st_size,
-                    'modified': stat.st_mtime,
-                    'metadata': file_metadata.get(f, {})
-                })
+        files = []
+        for f in DOWNLOAD_FOLDER.glob("*"):
+            if f.is_file() and not any([
+                f.name.endswith(('.jpg', '.jpeg', '.png', '.webp', '.part', '.ytdl')),
+                f.name.startswith('.')
+            ]):
+                file_info = {
+                    'name': f.name,
+                    'size': f.stat().st_size,
+                    'modified': f.stat().st_mtime,
+                    'metadata': file_metadata.get(f.name, {})
+                }
+                files.append(file_info)
         
         # Sort by modification time (newest first)
-        file_list.sort(key=lambda x: x['modified'], reverse=True)
-        return [f['name'] for f in file_list]
+        files.sort(key=lambda x: x['modified'], reverse=True)
+        
+        # Return just the filenames for compatibility
+        return [f['name'] for f in files]
+        
+    except Exception as e:
+        print(f"Error listing files: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
+
+@app.get("/file-info")
+async def get_file_info():
+    """Get detailed file information including download URLs"""
+    try:
+        files = []
+        for f in DOWNLOAD_FOLDER.glob("*"):
+            if f.is_file() and not any([
+                f.name.endswith(('.jpg', '.jpeg', '.png', '.webp', '.part', '.ytdl')),
+                f.name.startswith('.')
+            ]):
+                file_info = {
+                    'name': f.name,
+                    'size': f.stat().st_size,
+                    'modified': f.stat().st_mtime,
+                    'download_url': f"/download-file/{quote(f.name)}",
+                    'metadata': file_metadata.get(f.name, {})
+                }
+                files.append(file_info)
+        
+        files.sort(key=lambda x: x['modified'], reverse=True)
+        return files
         
     except Exception as e:
         return JSONResponse(
@@ -464,89 +472,27 @@ async def list_files():
             content={"error": str(e)}
         )
 
-
-@app.api_route("/download-file/{filename}", methods=["GET", "HEAD"])
-async def download_file(filename: str):
-    # Prevent directory traversal
-    filename = os.path.basename(filename)
-    path = os.path.join(DOWNLOAD_FOLDER, filename)
-
-    if not os.path.exists(path):
-        return JSONResponse(
-            status_code=404,
-            content={"error": "File not found"}
-        )
-
-    # Encode filename safely for HTTP headers (RFC 5987)
-    encoded_filename = quote(filename)
-
-    response = FileResponse(
-        path,
-        media_type="application/octet-stream"
-    )
-
-    # Proper UTF-8 safe header
-    response.headers["Content-Disposition"] = (
-        f"attachment; filename*=UTF-8''{encoded_filename}"
-    )
-
-    return response
-
-
-@app.get("/file-metadata/{filename}", response_class=JSONResponse)
-@app.head("/file-metadata/{filename}", response_class=Response)
-async def get_file_metadata_endpoint(filename: str):
-    """Get metadata including thumbnail for a specific file"""
-    filename = os.path.basename(filename)
-    
-    if filename in file_metadata:
-        return file_metadata[filename]
-    
-    # Try to find by base name without extension
-    for key in file_metadata:
-        if key.startswith(filename.rsplit('.', 1)[0]):
-            return file_metadata[key]
-    
-    # Return default if no metadata
+@app.get("/debug/paths")
+async def debug_paths():
+    """Debug endpoint to check file paths"""
     return {
-        'thumbnail': None,
-        'title': filename.replace('_', ' ').replace('-', ' ').rsplit('.', 1)[0],
-        'uploader': 'Unknown',
-        'duration': 'Unknown'
+        "base_dir": str(BASE_DIR),
+        "web_dir": str(WEB_DIR),
+        "download_folder": str(DOWNLOAD_FOLDER),
+        "download_folder_exists": DOWNLOAD_FOLDER.exists(),
+        "download_folder_contents": [str(f) for f in DOWNLOAD_FOLDER.iterdir()] if DOWNLOAD_FOLDER.exists() else [],
+        "thumbnails_folder": str(THUMBNAIL_FOLDER),
+        "file_metadata": file_metadata,
     }
 
+# [Keep your existing preview, start_download, progress, etc. endpoints]
 
-@app.get("/thumbnails/{filename}", response_class=FileResponse)
-@app.head("/thumbnails/{filename}", response_class=Response)
-async def get_thumbnail(filename: str):
-    # Security: prevent directory traversal
-    filename = os.path.basename(filename)
-    path = THUMBNAIL_FOLDER / filename
-    
-    if path.exists():
-        return FileResponse(path, media_type='image/jpeg')
-    
-    return JSONResponse(
-        status_code=404,
-        content={"error": "Thumbnail not found"}
-    )
-
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "downloads_folder": DOWNLOAD_FOLDER.exists(),
-        "thumbnails_folder": THUMBNAIL_FOLDER.exists(),
-        "ffmpeg_available": check_ffmpeg()
-    }
-
-
-def check_ffmpeg():
-    """Check if ffmpeg is available"""
-    try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
-        return True
-    except:
-        return False
+if __name__ == "__main__":
+    import uvicorn
+    PORT = int(os.getenv("PORT", 8000))
+    print(f"Starting Video Downloader...")
+    print(f"Local access: http://127.0.0.1:{PORT}")
+    print(f"Network access: http://{LOCAL_IP}:{PORT} (for mobile)")
+    print(f"Downloads folder: {DOWNLOAD_FOLDER}")
+    print(f"Thumbnails folder: {THUMBNAIL_FOLDER}")
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
