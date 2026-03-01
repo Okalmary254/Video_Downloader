@@ -1,3 +1,4 @@
+from email.quoprimime import quote
 from pathlib import Path
 from fastapi import FastAPI, Form, BackgroundTasks, Response
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
@@ -404,25 +405,33 @@ async def list_files():
         )
 
 
-@app.get("/download-file/{filename}", response_class=FileResponse)
-@app.head("/download-file/{filename}", response_class=Response)  # support HEAD
+@app.api_route("/download-file/{filename}", methods=["GET", "HEAD"])
 async def download_file(filename: str):
+
+    # Prevent directory traversal
     filename = os.path.basename(filename)
     path = os.path.join(DOWNLOAD_FOLDER, filename)
-    
+
     if not os.path.exists(path):
         return JSONResponse(
             status_code=404,
             content={"error": "File not found"}
         )
-    
-    return FileResponse(
+
+    # Encode filename safely for HTTP headers (RFC 5987)
+    encoded_filename = quote(filename)
+
+    response = FileResponse(
         path,
-        filename=filename,
-        media_type='application/octet-stream',
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
+        media_type="application/octet-stream"
     )
 
+    # Proper UTF-8 safe header
+    response.headers["Content-Disposition"] = (
+        f"attachment; filename*=UTF-8''{encoded_filename}"
+    )
+
+    return response
 @app.get("/file-metadata/{filename}", response_class=JSONResponse)
 @app.head("/file-metadata/{filename}", response_class=Response)  # support HEAD
 @app.get("/file-metadata/{filename}")
