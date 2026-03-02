@@ -60,7 +60,6 @@ THUMBNAIL_FOLDER.mkdir(exist_ok=True)
 
 # Create web folder if it doesn't exist
 WEB_DIR.mkdir(exist_ok=True)
-# Limit quality for faster downloads
 
 # Mount static files
 if WEB_DIR.exists():
@@ -234,20 +233,20 @@ def download_task(job_id, url, format_option):
         "audio": "bestaudio/best"
     }
     
-    if 'instagram.com' in url:
-
-        if format_option == "best":
-            actual_format = "best[ext=mp4]/best" 
-        elif format_option == "1080":
-            actual_format = "best[height<=1080][ext=mp4]/best[height<=1080]/best"
-        elif format_option == "720":
-            actual_format = "best[height<=720][ext=mp4]/best[height<=720]/best"
+    # Instagram needs simpler format selection - it doesn't support format combinations well
+    is_instagram = 'instagram.com' in url or 'cdninstagram.com' in url
+    
+    if is_instagram:
+        print(" Instagram URL detected - using simple format selection")
+        if format_option == "audio":
+            actual_format = "bestaudio/best"
         else:
-            actual_format = format_map.get(format_option, "best")
+            # For Instagram, just use "best" - trying to specify format causes issues
+            actual_format = "best"
     else:
         actual_format = format_map.get(format_option, "best")
-
-    actual_format = format_map.get(format_option, "best")
+    
+    print(f" Selected format: {actual_format}")
 
     # Base options - Use temp folder with sanitized filename
     ydl_opts = {
@@ -264,15 +263,18 @@ def download_task(job_id, url, format_option):
         'concurrent_fragment_downloads': 5,
         'fragment_retries': 3,
         'file_access_retries': 3,
-        'format': 'best[height<=1080]',
         'buffersize': 1024,  
         'http_chunk_size': 10_485_760,
         'throttledratelimit': 10_000_000,
         'sleep_interval': 0,  
         'max_sleep_interval': 0,
         'sleep_interval_requests': 0,
-        'cookiefile': str(COOKIES_FILE_PATH),
     }
+    
+    # Add cookies if file exists
+    if COOKIES_FILE_PATH.exists():
+        ydl_opts['cookiefile'] = str(COOKIES_FILE_PATH)
+        print(f" Using cookies from: {COOKIES_FILE_PATH}")
 
     # Add post-processors for specific formats
     if format_option == "audio":
@@ -291,18 +293,31 @@ def download_task(job_id, url, format_option):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             # Extract info first
             try:
+                print(f" Extracting info from: {url}")
                 info = ydl.extract_info(url, download=False)
             except Exception as e:
-                if "Request format is not available" in str(e):
-                    print(f"Requested format is not available for this video...")
+                error_msg = str(e)
+                print(f" Initial extraction failed: {error_msg}")
+                
+                # Try fallback strategies
+                if "Requested format is not available" in error_msg or "format" in error_msg.lower():
+                    print(" Trying with simple 'best' format...")
                     ydl_opts['format'] = "best"
+                    
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
                         info = ydl2.extract_info(url, download=False)
-                else:        
-                    raise Exception(f"Failed to extract video info: {e}")
+                        
+                elif "cookies" in error_msg.lower() or "login" in error_msg.lower():
+                    print(" Trying without cookies...")
+                    ydl_opts.pop('cookiefile', None)
+                    
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
+                        info = ydl2.extract_info(url, download=False)
+                else:
+                    raise Exception(f"Failed to extract video info: {error_msg}")
             
             if not info:
-                raise Exception("Could not extract video info")
+                raise Exception("Could not extract video info - info is None")
             
             # Handle playlist
             if 'entries' in info and info['entries']:
@@ -327,10 +342,11 @@ def download_task(job_id, url, format_option):
                         "title": info.get('title', 'Unknown')
                     }
             
-            print(f"Starting download: {info.get('title', 'Unknown')}")
-            print(f"Expected filename: {video_basename}")
+            print(f" Title: {info.get('title', 'Unknown')}")
+            print(f" Expected filename: {video_basename}")
             
             # Download the video
+            print("⬇ Starting download...")
             ydl.download([url])
             
             # Wait a moment for file to be fully written
@@ -339,11 +355,14 @@ def download_task(job_id, url, format_option):
             # Find the actual file (sometimes yt-dlp changes the filename)
             actual_path = TEMP_DOWNLOAD_FOLDER / video_basename
             if not actual_path.exists():
+                print(" Expected file not found, searching for actual file...")
                 # Try to find the actual file by extension and modification time
                 if format_option == "audio":
                     files = list(TEMP_DOWNLOAD_FOLDER.glob("*.mp3")) + list(TEMP_DOWNLOAD_FOLDER.glob("*.m4a"))
                 else:
-                    files = list(TEMP_DOWNLOAD_FOLDER.glob("*.mp4")) + list(TEMP_DOWNLOAD_FOLDER.glob("*.webm")) + list(TEMP_DOWNLOAD_FOLDER.glob("*.mkv"))
+                    files = list(TEMP_DOWNLOAD_FOLDER.glob("*.mp4")) + \
+                           list(TEMP_DOWNLOAD_FOLDER.glob("*.webm")) + \
+                           list(TEMP_DOWNLOAD_FOLDER.glob("*.mkv"))
                 
                 # Filter out partial/temp files
                 files = [f for f in files if not any(ext in f.name for ext in ['.part', '.ytdl', '.temp'])]
@@ -353,11 +372,12 @@ def download_task(job_id, url, format_option):
                     files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
                     actual_path = files[0]
                     video_basename = actual_path.name
-                    print(f"Found actual file: {video_basename}")
+                    print(f" Found actual file: {video_basename}")
                 else:
-                    raise Exception("Downloaded file not found")
+                    raise Exception("Downloaded file not found in temp folder")
             
             file_size = actual_path.stat().st_size
+            print(f" File size: {file_size:,} bytes ({file_size / (1024*1024):.1f} MB)")
             
             # Download and save thumbnail (optional)
             thumbnail_url = None
@@ -375,8 +395,9 @@ def download_task(job_id, url, format_option):
                             f.write(response.read())
                         
                         thumbnail_url = f"/thumbnails/{thumb_filename}"
+                        print(f" Thumbnail saved: {thumb_filename}")
                 except Exception as e:
-                    print(f"Thumbnail download failed: {e}")
+                    print(f" Thumbnail download failed: {e}")
             
             # Store metadata with the actual filename
             file_metadata[video_basename] = {
@@ -399,7 +420,7 @@ def download_task(job_id, url, format_option):
                     "download_url": f"/download-file/{video_basename}"
                 }
             
-            print(f"✓ Download completed: {video_basename} ({file_size:,} bytes)")
+            print(f" Download completed: {video_basename} ({file_size:,} bytes)")
             
     except Exception as e:
         with progress_lock:
@@ -407,7 +428,7 @@ def download_task(job_id, url, format_option):
                 "status": "error",
                 "error": str(e)
             }
-        print(f"✗ Download error: {e}")
+        print(f" Download error: {e}")
         import traceback
         traceback.print_exc()
 
@@ -415,8 +436,11 @@ def download_task(job_id, url, format_option):
 async def preview_video(url: str = Form(...)):
     """Get video information without downloading"""
     try:
-        print(f"Preview request for URL: {url}")
-        print(f"using cookies file: {COOKIES_FILE_PATH} (exists: {COOKIES_FILE_PATH.exists()})")
+        print(f" Preview request for URL: {url}")
+        
+        is_instagram = 'instagram.com' in url or 'cdninstagram.com' in url
+        if is_instagram:
+            print(" Instagram URL detected")
         
         ydl_opts = {
             'quiet': True,
@@ -425,11 +449,22 @@ async def preview_video(url: str = Form(...)):
             'ignoreerrors': True,
             'no_color': True,
             'geo_bypass': True,
-            'cookiefile': str(COOKIES_FILE_PATH),
         }
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        # Add cookies if available
+        if COOKIES_FILE_PATH.exists():
+            ydl_opts['cookiefile'] = str(COOKIES_FILE_PATH)
+            print(f" Using cookies: {COOKIES_FILE_PATH}")
+        
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as e:
+            # Try without cookies if it fails
+            print(f" Preview failed with cookies, trying without: {e}")
+            ydl_opts.pop('cookiefile', None)
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
 
         if not info:
             return JSONResponse(status_code=400, content={"error": "Could not extract video information"})
@@ -492,6 +527,8 @@ async def preview_video(url: str = Form(...)):
         except (ValueError, TypeError):
             view_str = "0"
 
+        print(f" Preview successful: {info.get('title', 'Unknown')}")
+        
         return {
             "title": info.get('title', 'Unknown'),
             "thumbnail": thumbnail,
@@ -502,7 +539,7 @@ async def preview_video(url: str = Form(...)):
         }
         
     except Exception as e:
-        print(f"Preview error: {e}")
+        print(f" Preview error: {e}")
         import traceback
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": str(e)})
@@ -516,6 +553,11 @@ async def start_download(background_tasks: BackgroundTasks,
         return JSONResponse(status_code=400, content={"error": "URL is required"})
 
     job_id = str(uuid.uuid4())
+    
+    print(f"\n New download request:")
+    print(f"   Job ID: {job_id}")
+    print(f"   URL: {url}")
+    print(f"   Quality: {quality}")
 
     with progress_lock:
         progress_store[job_id] = {
@@ -579,13 +621,13 @@ async def download_file(filename: str):
         filename = unquote(filename)
         filename = os.path.basename(filename)
         
-        print(f"Looking for file: {filename}")
+        print(f" Download request for: {filename}")
         
         # First try exact match
         path = TEMP_DOWNLOAD_FOLDER / filename
         
         if not path.exists():
-            print(f"Exact match not found: {path}")
+            print(f" Exact match not found, searching...")
             
             # Try to find by partial match (remove special characters)
             # Get all mp4/mp3 files
@@ -607,23 +649,18 @@ async def download_file(filename: str):
                 matches.sort(key=lambda x: x.stat().st_mtime, reverse=True)
                 path = matches[0]
                 filename = path.name
-                print(f"Found match: {filename}")
+                print(f" Found match: {filename}")
             else:
                 # Last resort: return the most recent file
                 if all_files:
                     all_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
                     path = all_files[0]
                     filename = path.name
-                    print(f"Using most recent file: {filename}")
+                    print(f"ℹ Using most recent file: {filename}")
                 else:
                     return JSONResponse(status_code=404, content={"error": "File not found"})
 
         file_size = path.stat().st_size
-        
-        async def interfile():
-            async with aiofiles.open(path, 'rb') as f:
-                while chunk := await f.read(1024 * 1024):  # 1 MB chunks
-                    yield chunk
 
         # Determine media type
         if filename.endswith('.mp4'):
@@ -635,7 +672,7 @@ async def download_file(filename: str):
         else:
             media_type = 'application/octet-stream'
 
-        print(f"Serving file: {filename} ({file_size:,} bytes)")
+        print(f" Serving: {filename} ({file_size:,} bytes)")
         
         # Simple filename for header
         safe_filename = filename.encode('ascii', 'ignore').decode('ascii')
@@ -654,7 +691,7 @@ async def download_file(filename: str):
         )
         
     except Exception as e:
-        print(f"Download error: {e}")
+        print(f" Download error: {e}")
         import traceback
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": str(e)})
@@ -677,6 +714,27 @@ async def device_info():
         "file_count": len(list(TEMP_DOWNLOAD_FOLDER.glob("*"))),
         "message": "Files are downloaded directly to your device"
     }
+
+@app.get("/file-metadata/{filename}")
+async def get_file_metadata_endpoint(filename: str):
+    """Get metadata for a specific file"""
+    filename = os.path.basename(unquote(filename))
+    
+    if filename in file_metadata:
+        return JSONResponse(
+            content=file_metadata[filename],
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
+    
+    # Return default metadata
+    return JSONResponse(
+        content={
+            'thumbnail': None,
+            'title': filename.rsplit('.', 1)[0],
+            'filename': filename
+        },
+        headers={"Access-Control-Allow-Origin": "*"}
+    )
 
 @app.get("/debug/cookies")
 async def debug_cookies():
@@ -720,25 +778,15 @@ async def debug_cookies():
         result["cookies_in_ydl_format"] = False
         result["ydl_error"] = str(e)
     
-    # Try a test extraction with cookies
-    try:
-        test_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-        ydl_opts = {
-            'quiet': True,
-            'cookiefile': str(COOKIES_FILE_PATH),
-            'extract_flat': True,  # Don't download, just extract info
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(test_url, download=False)
-            result["test_extraction"] = "successful" if info else "failed"
-    except Exception as e:
-        result["test_extraction"] = f"failed: {str(e)}"
-    
     return result
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    return {
+        "status": "healthy",
+        "temp_folder": TEMP_DOWNLOAD_FOLDER.exists(),
+        "cookies_available": COOKIES_FILE_PATH.exists()
+    }
 
 
 # Cache video metadata to avoid repeated extraction
@@ -757,7 +805,7 @@ session.mount('https://', adapter)
 if __name__ == "__main__":
     import uvicorn
     PORT = int(os.getenv("PORT", 8000))
-    print(f"Starting Video Downloader...")
-    print(f"Local access: http://127.0.0.1:{PORT}")
-    print(f"Network access: http://{LOCAL_IP}:{PORT}")
+    print(f" Starting Video Downloader...")
+    print(f"   Local: http://127.0.0.1:{PORT}")
+    print(f"   Network: http://{LOCAL_IP}:{PORT}")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
