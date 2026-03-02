@@ -234,6 +234,19 @@ def download_task(job_id, url, format_option):
         "audio": "bestaudio/best"
     }
     
+    if 'instagram.com' in url:
+
+        if format_option == "best":
+            actual_format = "best[ext=mp4]/best" 
+        elif format_option == "1080":
+            actual_format = "best[height<=1080][ext=mp4]/best[height<=1080]/best"
+        elif format_option == "720":
+            actual_format = "best[height<=720][ext=mp4]/best[height<=720]/best"
+        else:
+            actual_format = format_map.get(format_option, "best")
+    else:
+        actual_format = format_map.get(format_option, "best")
+
     actual_format = format_map.get(format_option, "best")
 
     # Base options - Use temp folder with sanitized filename
@@ -277,7 +290,16 @@ def download_task(job_id, url, format_option):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             # Extract info first
-            info = ydl.extract_info(url, download=False)
+            try:
+                info = ydl.extract_info(url, download=False)
+            except Exception as e:
+                if "Request format is not available" in str(e):
+                    print(f"Requested format is not available for this video...")
+                    ydl_opts['format'] = "best"
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
+                        info = ydl2.extract_info(url, download=False)
+                else:        
+                    raise Exception(f"Failed to extract video info: {e}")
             
             if not info:
                 raise Exception("Could not extract video info")
